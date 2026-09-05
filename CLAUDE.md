@@ -14,9 +14,10 @@ This is a [`uv` workspace](https://docs.astral.sh/uv/concepts/projects/workspace
 uv sync                                                  # install/sync all workspace packages
 uv run --package emma65-buttons emma65-buttons --help    # run a peripheral
 uv run --package emma65-buttons emma65-buttons           # run with defaults
+uv run pytest                                            # run tests for every package, from the repo root
 ```
 
-There is no lint, test, or CI tooling configured yet — don't assume `pytest`/`ruff`/etc. are set up unless you find config for them.
+Tests live in a `tests/` directory alongside each package's `src/` (e.g. `via/tests/test_ascii_client.py`) — `pytest` is a workspace-level dev-dependency (root `pyproject.toml`'s `[dependency-groups]`), so `uv run pytest` from the repo root discovers and runs every package's tests in one invocation; don't add a per-package pytest config. GitHub Actions (`.github/workflows/ci.yml`) runs `uv sync && uv run pytest` on push/PR. There is no lint/type-check tooling configured yet — don't assume `ruff`/etc. are set up unless you find config for them.
 
 ## Architecture
 
@@ -30,4 +31,4 @@ There is no lint, test, or CI tooling configured yet — don't assume `pytest`/`
 
 ## In-progress work
 
-`gpio-playground/` (currently untracked) contains exploratory design notes and a Pygame mockup (`row_mockup.py`) for a more general VIA GPIO panel peripheral (all 8 data pins + CA1/CA2/CB1/CB2 per port, with direction/pin-state indicators), distinct from the simple two-button `buttons` peripheral. The checkpoint docs record UI decisions already made (and alternatives already tried and rejected) — read them before proposing changes to that mockup's visual design so you don't re-litigate settled decisions.
+`gpio-playground/plan/` contains the settled design (`via_gpio_playground_design.md`), UI checkpoint docs recording decisions already made (and alternatives already tried and rejected — read before proposing visual-design changes so you don't re-litigate them), a Pygame mockup (`row_mockup.py`), and a unit-by-unit `via_gpio_playground_implementation_plan.md` for building a more general VIA GPIO panel peripheral (all 8 data pins + CA1/CA2/CB1/CB2 per port, with direction/pin-state indicators), distinct from the simple two-button `buttons` peripheral. `gpio-playground/` itself is excluded from the `uv` workspace (it's plan/mockup content, not a package) — the plan's Unit 2 creates the real package, tentatively named `via-playground/`.
