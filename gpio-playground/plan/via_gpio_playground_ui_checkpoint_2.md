@@ -64,6 +64,23 @@ stacked, a smaller window), spacing alone may not hold up and this could
 need a stronger cue — a divider line or a subtle background tint are the
 likely candidates.
 
+## Control-cell LED semantics
+
+Resolved (post-checkpoint clarification): the LED on a control cell
+(CA1/CA2/CB1/CB2) represents that pin's level **when it is currently serving
+as an output driven by the VIA** — the control-cell analogue of the data-cell
+LED, which shows local/pin state. For a control line that's an input (or not
+currently in an output-producing mode), the LED has nothing to show and stays
+dark.
+
+**Not yet implemented in the mockup**: `row_mockup.py` currently hardcodes
+`on=False` for every control-cell LED regardless of direction (see the
+`draw_led` call in the `else` branch of the per-cell drawing loop), and the
+control-cell `cfg` dicts carry no output-level field to drive it from. This
+happens to look plausible for CA1/CB1 (input, so dark is correct) but is not
+actually wired up for the CB2/output case it's meant to represent — that's
+follow-on work, not a design gap.
+
 ## Port B relabel + PB6 pulse-counting case
 
 All labels moved from Port A to Port B (`PB7`…`PB0`, `CB1`, `CB2`), and the
