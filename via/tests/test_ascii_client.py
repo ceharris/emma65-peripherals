@@ -41,7 +41,7 @@ def test_connect_returns_false_when_socket_missing(tmp_path):
 def test_set_bits_sends_S_message(connected_pair):
     client, conn = connected_pair
     client.set_bits("A", 0x05)
-    assert conn.recv(1024) == b"SA05"
+    assert conn.recv(1024) == b"WRONG"
 
 
 def test_reset_bits_sends_R_message(connected_pair):
