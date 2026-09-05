@@ -16,6 +16,11 @@ Textual, curses, ...).
 - [`buttons`](buttons) (`emma65-buttons`) — a `pygame-ce` push button and
   toggle button wired to two VIA GPIO pins.
 
+## Shared packages
+
+- [`via`](via) (`emma65-via`) — client for the VIA peer protocol's ASCII
+  encoding, shared by VIA-based peripherals.
+
 ## Running a peripheral
 
 ```bash

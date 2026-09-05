@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "emma65-buttons",
+    "emma65-via",
 ]
 
 [[package]]
@@ -12,11 +13,20 @@ name = "emma65-buttons"
 version = "0.1.0"
 source = { editable = "buttons" }
 dependencies = [
+    { name = "emma65-via" },
     { name = "pygame-ce" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pygame-ce", specifier = ">=2.5" }]
+requires-dist = [
+    { name = "emma65-via", editable = "via" },
+    { name = "pygame-ce", specifier = ">=2.5" },
+]
+
+[[package]]
+name = "emma65-via"
+version = "0.1.0"
+source = { editable = "via" }
 
 [[package]]
 name = "pygame-ce"

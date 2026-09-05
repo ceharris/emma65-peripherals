@@ -14,7 +14,7 @@ import sys
 
 import pygame
 
-from .via_transport import ViaAsciiClient
+from emma65_via import ViaAsciiClient
 
 DEFAULT_SOCKET = "~/.emma/sock/via6522"
 RECONNECT_INTERVAL_MS = 1000
