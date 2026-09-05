@@ -1,0 +1,18 @@
+[project]
+name = "emma65-buttons"
+version = "0.1.0"
+description = "A push button and a toggle button wired to two VIA GPIO pins"
+authors = [
+    { name = "Carl Harris", email = "ceharris414@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pygame-ce>=2.5",
+]
+
+[project.scripts]
+emma65-buttons = "emma65_buttons:main"
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"

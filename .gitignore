@@ -4,3 +4,6 @@
 target/
 node_modules/
 doc/book/
+.venv/
+__pycache__/
+*.pyc
