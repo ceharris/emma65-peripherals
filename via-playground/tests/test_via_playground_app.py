@@ -68,6 +68,16 @@ def test_parse_args_accepts_hex_pb_direction():
     assert args.pb_direction == 0x3F
 
 
+def test_parse_args_defaults_pb6_pulse_counting_on():
+    args = parse_args([])
+    assert args.pb6_pulse_counting is True
+
+
+def test_parse_args_accepts_disabling_pb6_pulse_counting():
+    args = parse_args(["--no-pb6-pulse-counting"])
+    assert args.pb6_pulse_counting is False
+
+
 def test_port_levels_start_at_zero(connected_peripheral):
     peripheral, _ = connected_peripheral
     assert peripheral.ports["A"].level == 0
@@ -185,7 +195,8 @@ def test_toggle_data_on_port_b_uses_port_b_wire_messages(connected_peripheral):
     peripheral, conn = connected_peripheral
 
     peripheral.toggle_data("B", 2)
-    assert peripheral.ports["B"].local == 0x04
+    # Bit 6 is already forced high by PB6's declared pulse-counting default.
+    assert peripheral.ports["B"].local == 0x44
     assert conn.recv(1024) == b"SB04"
     assert peripheral.ports["A"].local == 0  # Port A untouched
 
@@ -263,12 +274,16 @@ def test_reconnect_reasserts_local_and_momentary_state_for_all_owned_bits(via_se
     # press overrides it back to driven-low; every other bit is driven low
     # by its (untouched) toggle position; CA1/CA2 are untouched, so they
     # reassert to their default (rising) polarity's idle-low level. Port B:
-    # bit 2 is on, every other owned bit (0-5) is driven low; CB1/CB2 are
+    # bit 2 is on, bit 6 (PB6) is forced high by its declared pulse-counting
+    # default, every other owned bit (0,1,3,4,5) is driven low; CB1/CB2 are
     # likewise untouched.
     expected = (
         b"".join(b"SA02" if bit == 1 else b"RA%02X" % (1 << bit) for bit in range(8))
         + b"RCA1RCA2"
-        + b"".join(b"SB04" if bit == 2 else b"RB%02X" % (1 << bit) for bit in range(6))
+        + b"".join(
+            b"SB04" if bit == 2 else b"SB40" if bit == 6 else b"RB%02X" % (1 << bit)
+            for bit in range(7)
+        )
         + b"RCB1RCB2"
     )
     data = b""
@@ -453,11 +468,12 @@ def test_reconnect_reasserts_control_pin_state(via_server):
     # Reassertion happens per port. CA1's pulse is still "in flight" per its
     # own state (reconnecting doesn't cancel it) so it reasserts the active
     # level; every other control pin (CA2, CB1, CB2) is untouched and
-    # reasserts its idle (rising-polarity, idle-low) level.
+    # reasserts its idle (rising-polarity, idle-low) level. Port B's bit 6
+    # (PB6) is forced high by its declared pulse-counting default.
     expected = (
         b"".join(b"RA%02X" % (1 << bit) for bit in range(8))
         + b"SCA1RCA2"
-        + b"".join(b"RB%02X" % (1 << bit) for bit in range(6))
+        + b"".join(b"SB40" if bit == 6 else b"RB%02X" % (1 << bit) for bit in range(7))
         + b"RCB1RCB2"
     )
     data = b""
@@ -467,3 +483,115 @@ def test_reconnect_reasserts_control_pin_state(via_server):
 
     peripheral.close()
     conn2.close()
+
+
+def test_pb6_starts_forced_pulled_up_when_pulse_counting_declared(connected_peripheral):
+    peripheral, _ = connected_peripheral
+    assert peripheral.ports["B"].local & 0x40
+
+
+def test_pb6_stays_ordinary_data_bit_when_pulse_counting_declared_off(via_server):
+    sock_path, server = via_server
+    peripheral = Peripheral(parse_args(["--socket", sock_path, "--no-pb6-pulse-counting"]))
+    peripheral.connect_if_needed(0)
+    server.accept()
+    assert peripheral.ports["B"].local & 0x40 == 0
+    peripheral.close()
+
+
+def test_press_pb6_in_level_mode_drives_low_while_held(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    # Idle is forced pulled up; a level-mode press pulls the line low.
+    peripheral.press_pb6("B", 0)
+    assert conn.recv(1024) == b"RB40"
+
+    peripheral.release_pb6("B")
+    assert conn.recv(1024) == b"SB40"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_toggle_pb6_mode_flips_between_level_and_pulse(connected_peripheral):
+    peripheral, _ = connected_peripheral
+
+    assert peripheral.ports["B"].pb6.mode == "level"
+    peripheral.toggle_pb6_mode("B")
+    assert peripheral.ports["B"].pb6.mode == "pulse"
+    peripheral.toggle_pb6_mode("B")
+    assert peripheral.ports["B"].pb6.mode == "level"
+
+
+def test_press_pb6_in_pulse_mode_fires_one_transition_ignoring_hold_time(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_pb6_mode("B")  # -> pulse
+    peripheral.press_pb6("B", 1000)
+    assert conn.recv(1024) == b"RB40"
+
+    # Releasing before the pulse duration elapses must not change the wire.
+    peripheral.release_pb6("B")
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    # Only update_ctrl_pulses, once the duration has elapsed, reverts to idle.
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS - 1)
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS)
+    assert conn.recv(1024) == b"SB40"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_pressing_pb6_again_mid_pulse_restarts_the_timer(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_pb6_mode("B")
+    peripheral.press_pb6("B", 1000)
+    conn.recv(1024)
+
+    peripheral.press_pb6("B", 1050)  # re-press before the first pulse would have ended
+    conn.recv(1024)  # re-asserts the active (low) level again
+
+    # The original deadline (1000 + duration) has passed, but the restarted
+    # one (1050 + duration) has not -- must not have reverted yet.
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS)
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    peripheral.update_ctrl_pulses(1050 + CTRL_PULSE_DURATION_MS)
+    assert conn.recv(1024) == b"SB40"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_toggle_pb6_mode_cancels_an_in_flight_pulse(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_pb6_mode("B")  # -> pulse
+    peripheral.press_pb6("B", 1000)
+    conn.recv(1024)
+
+    peripheral.toggle_pb6_mode("B")  # -> level, mid-pulse
+    assert conn.recv(1024) == b"SB40"  # reverted to idle (pulled-up) immediately
+
+    # The cancelled pulse's deadline must no longer fire a spurious revert.
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS)
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    peripheral.close()
+    conn.close()

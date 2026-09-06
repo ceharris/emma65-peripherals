@@ -182,9 +182,9 @@ def test_build_port_a_cells_carry_port_letter():
 def test_build_port_b_pin_order_and_kinds():
     row = cells.build_port_b()
     names = [cell.name for cell in row]
-    assert names == ["PB5", "PB4", "PB3", "PB2", "PB1", "PB0", "CB1", "CB2"]
+    assert names == ["PB6", "PB5", "PB4", "PB3", "PB2", "PB1", "PB0", "CB1", "CB2"]
     kinds = [cell.kind for cell in row]
-    assert kinds == ["data"] * 6 + ["ctrl"] * 2
+    assert kinds == ["data"] * 7 + ["ctrl"] * 2
     assert all(cell.port == "B" for cell in row)
 
 
@@ -209,9 +209,32 @@ def test_build_port_is_the_shared_constructor_behind_build_port_a_and_b():
     generic_a_names = [cell.name for cell in cells.build_port("A", 8, 0xF0)]
     assert a_names == generic_a_names
 
-    b_names = [cell.name for cell in cells.build_port_b(0x38)]
+    # PB6 is layered on separately by build_port_b (see PB6Cell); the rest
+    # of the row still comes straight from the shared build_port.
+    b_names = [cell.name for cell in cells.build_port_b(0x38)][1:]
     generic_b_names = [cell.name for cell in cells.build_port("B", 6, 0x38)]
     assert b_names == generic_b_names
+
+
+def test_build_port_b_pb6_direction_follows_declared_mask():
+    row = cells.build_port_b(direction_mask=0b1000000)  # PB6 out; rest in
+    data_cells = {cell.name: cell for cell in row if cell.kind == "data"}
+    assert data_cells["PB6"].direction == "out"
+    assert data_cells["PB0"].direction == "in"
+
+
+def test_build_port_b_pb6_defaults_to_declared_pulse_counting():
+    pb6 = cells.build_port_b()[0]
+    assert isinstance(pb6, cells.PB6Cell)
+    assert pb6.pulse_counting is True
+    # Forced pulled up at construction -- not something a toggle click set.
+    assert pb6.local is True
+
+
+def test_build_port_b_pb6_pulse_counting_can_be_declared_off():
+    pb6 = cells.build_port_b(pulse_counting=False)[0]
+    assert pb6.pulse_counting is False
+    assert pb6.local is False
 
 
 def test_layout_ports_places_each_port_via_layout_row_with_a_port_gap_between():
