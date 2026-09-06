@@ -17,16 +17,22 @@ ld65 --config via_read_uat.cfg via_read_uat.o -o via_read_uat.bin
 
 ## Run the emulator
 
+There is no `emma65` on `$PATH` by default -- build one from current
+`emma65-rust` source:
+
 ```bash
-emma65 --config emulator.toml
+cd path/to/emma65-rust   # the emma65 (Rust) checkout, not this repo
+cargo build
+target/debug/emma65 --config path/to/emulator.toml
 ```
 
-**Note:** as of 2026-09-06, the `emma65` on `$PATH` (`~/bin/emma65`, dated
-2026-06-22) predates the VIA peer protocol's connect-time state dump --
-against that build, a peer socket connects fine but never receives any
-bytes, even the documented initial `PortState`/`CtrlState` dump. A build
-from current `emma65-rust` source (e.g. `~/git/emma65/target/debug/emma65`
-or a fresh `cargo build`) is required to see real protocol traffic.
+**Note:** as of 2026-09-06, a stale prebuilt `emma65` (previously at
+`~/bin/emma65`, dated 2026-06-22) was found to predate the VIA peer
+protocol's connect-time state dump -- against that build, a peer socket
+connects fine but never receives any bytes, even the documented initial
+`PortState`/`CtrlState` dump. It's since been removed, but if `emma65`
+ever reappears on `$PATH` and this UAT seems to hang with no traffic,
+suspect a stale build before suspecting the Python code.
 
 ## Watch decoded events
 
