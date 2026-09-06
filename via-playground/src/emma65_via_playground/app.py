@@ -2,22 +2,31 @@
 
 Connects to a `via/6522` device's `unix:` transport and speaks the VIA peer
 protocol's ASCII encoding via `emma65_via`. Port A's data pins (PA0-PA7) and
-Port B's (PB0-PB6; PB7 is Unit 9) are fully interactive: clicking a toggle
-flips that pin's local-pull state and clicking-and-holding a momentary
-button asserts the opposite level for the duration of the press (see
-`PortIO`/`Peripheral`). The chevron's fill continues to track live pin-level
-events from the VIA; direction stays a declared, panel-side setting
-(`--pa-direction`/`--pb-direction`) since the protocol never conveys DDR.
-CA1/CA2/CB1/CB2 are momentary-only control lines: level mode drives the
-active edge for as long as the button is held, pulse mode fires one
-fixed-duration transition per press regardless of hold time, and polarity
-picks which edge (rising/falling) counts as "active" (see `ControlPinState`).
+Port B's (PB0-PB7) are fully interactive: clicking a toggle flips that pin's
+local-pull state and clicking-and-holding a momentary button asserts the
+opposite level for the duration of the press (see `PortIO`/`Peripheral`).
+The chevron's fill continues to track live pin-level events from the VIA;
+direction stays a declared, panel-side setting (`--pa-direction`/
+`--pb-direction`) since the protocol never conveys DDR. CA1/CA2/CB1/CB2 are
+momentary-only control lines: level mode drives the active edge for as long
+as the button is held, pulse mode fires one fixed-duration transition per
+press regardless of hold time, and polarity picks which edge (rising/
+falling) counts as "active" (see `ControlPinState`).
 
 PB6 layers T2 pulse-counting behavior on top of an ordinary data pin when
 `--pb6-pulse-counting` is declared (default on): it's forced pulled up, and
 its toggle is repurposed into the same pulse/level mode-select CA1/CA2 use
 for their momentary, since the wire protocol never reports ACR either (see
 `PB6State`).
+
+PB7 keeps its ordinary toggle/momentary untouched -- when Timer 1 is in
+free-run/PB7-toggle mode, the VIA drives this pin directly regardless of
+DDRB7, "the same 'pin can diverge from local' story as any output pin"
+(design doc), so no special interactivity wiring is needed here. It layers
+two independent things instead: a purely informational, declared
+`--pb7-free-run` indicator (again, ACR isn't observable live -- see
+`PB6State`) and a panel-local audio-routing toggle plus a naive square-wave
+audio reconstruction of PB7's live wire level (see `PB7State`, `Pb7Audio`).
 """
 
 from __future__ import annotations
@@ -32,11 +41,23 @@ from emma65_via import PortBitsReset, PortBitsSet, PortState, ViaAsciiClient
 
 from . import cells
 
+try:
+    import sounddevice as sd
+except OSError:
+    # sounddevice imports fine as a Python package but probes for the
+    # PortAudio native library at import time -- raises OSError immediately
+    # if it's not installed (e.g. a headless dev/CI box with no audio
+    # backend at all). Degrade to silent playback rather than crashing the
+    # whole panel over a missing speaker.
+    sd = None
+
 DEFAULT_SOCKET = "~/.emma/sock/via6522"
 DEFAULT_PA_DIRECTION = 0xF0
-DEFAULT_PB_DIRECTION = 0x38
+DEFAULT_PB_DIRECTION = 0xB8
 RECONNECT_INTERVAL_MS = 1000
 CTRL_PULSE_DURATION_MS = 100
+PB7_AUDIO_SAMPLE_RATE = 44100
+PB7_AUDIO_AMPLITUDE = 0.2
 
 FOOTER_H = cells.sc(24)
 CONNECTED_COLOR = (120, 200, 140)
@@ -69,11 +90,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--pb-direction", type=_hex_byte, default=DEFAULT_PB_DIRECTION, metavar="HEX",
-        help="Declared DDRB value for Port B data pins PB0-PB6, as a hex byte -- bit n set "
-        f"means PBn is an output (default: {DEFAULT_PB_DIRECTION:02X}, i.e. PB5-PB3 out, "
-        "PB2-PB0 in, PB6 in). Bit 7 is ignored (PB7 isn't in scope yet). Same DDR caveat "
-        "as --pa-direction applies; for PB6 this is independent of --pb6-pulse-counting, "
-        "which governs local pull, not direction.",
+        help="Declared DDRB value for Port B data pins, as a hex byte -- bit n set means PBn "
+        f"is an output (default: {DEFAULT_PB_DIRECTION:02X}, i.e. PB7 out, PB6 in, PB5-PB3 "
+        "out, PB2-PB0 in). Same DDR caveat as --pa-direction applies; for PB6/PB7 this is "
+        "independent of --pb6-pulse-counting/--pb7-free-run, which govern local pull/audio, "
+        "not direction.",
     )
     parser.add_argument(
         "--pb6-pulse-counting", action=argparse.BooleanOptionalAction, default=True,
@@ -83,6 +104,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "When enabled, PB6 is forced pulled up and its toggle is repurposed into a "
         "pulse/level mode-select for the momentary switch; when disabled (--no-pb6-pulse-"
         "counting), PB6 behaves exactly like any other Port B data pin.",
+    )
+    parser.add_argument(
+        "--pb7-free-run", action=argparse.BooleanOptionalAction, default=False,
+        help="Declare whether Timer 1 is configured for this panel's ROM/firmware in "
+        "free-run/PB7-toggle mode (ACR bits 7:6 = 1x), which drives PB7 automatically to "
+        "produce a square wave (default: disabled). The VIA peer protocol never reports "
+        "ACR, so this can't be read live -- same reasoning as --pb6-pulse-counting. This "
+        "only controls a small informational badge on PB7's cell; it doesn't change PB7's "
+        "interactivity (its toggle/momentary work exactly like any other data pin, same as "
+        "any output pin that can be driven by both the panel and the VIA).",
     )
     return parser.parse_args(argv)
 
@@ -133,13 +164,31 @@ class PB6State:
 
 
 @dataclass
+class PB7State:
+    """PB7's declared T1 free-run configuration and panel-local audio routing.
+
+    `free_run` is a declared, CLI-level fact (`--pb7-free-run`) for the same
+    reason `PB6State.pulse_counting` is -- the VIA peer protocol never
+    reports ACR, so whether T1 is actually driving PB7 automatically can't
+    be read live. Unlike PB6, nothing about PB7's own toggle/momentary
+    interactivity changes based on this -- it's purely an informational
+    badge (`PB7Cell`).
+
+    `speaker_on` is panel-local audio-routing state -- never sent over the
+    wire, toggled only by clicking the panel's own speaker icon.
+    """
+
+    free_run: bool
+    speaker_on: bool = True
+
+
+@dataclass
 class PortIO:
     """Local write-state for one port's data bits and two control pins.
 
     `num_bits` is how many data lines this panel owns on this port (8 for
-    Port A, 7 for Port B now that PB6 is in scope -- PB7 isn't until Unit
-    9) -- it bounds reconnect re-assertion so the panel never sends a bit
-    it doesn't own.
+    both ports now that Port B's PB7 is in scope) -- it bounds reconnect
+    re-assertion so the panel never sends a bit it doesn't own.
 
     `local` is the toggle position bitmask (bit set = pulling high) -- the
     LED and toggle widgets reflect this directly, except for Port B's bit
@@ -150,8 +199,10 @@ class PortIO:
     the duration of the press (mirroring
     `emma65_buttons.ButtonPeripheral.toggle`/`_send_bit`, generalized from
     one hardcoded bit to 8 independent ones, and now to more than one
-    port). `level` is the live pin level read back from the VIA. `ctrl`
-    maps control-pin number (1 or 2) to its `ControlPinState`. `pb6` is
+    port). `level` is the live pin level read back from the VIA -- this is
+    also what `Pb7Audio` reconstructs PB7's audio from, since it's the
+    actual node level regardless of which side is driving it. `ctrl` maps
+    control-pin number (1 or 2) to its `ControlPinState`. `pb6`/`pb7` are
     only set on Port B.
     """
 
@@ -161,6 +212,7 @@ class PortIO:
     momentary: int = 0
     ctrl: dict[int, ControlPinState] = field(default_factory=lambda: {1: ControlPinState(), 2: ControlPinState()})
     pb6: PB6State | None = None
+    pb7: PB7State | None = None
 
     def driven_level(self, bit: int) -> bool:
         mask = 1 << bit
@@ -180,10 +232,15 @@ class Peripheral:
     def __init__(self, args: argparse.Namespace):
         self._client = ViaAsciiClient(args.socket)
         self._next_connect_attempt = 0
-        port_b = PortIO(num_bits=7, pb6=PB6State(pulse_counting=args.pb6_pulse_counting))
+        port_b = PortIO(
+            num_bits=8,
+            pb6=PB6State(pulse_counting=args.pb6_pulse_counting),
+            pb7=PB7State(free_run=args.pb7_free_run),
+        )
         if port_b.pb6.pulse_counting:
             port_b.local |= 1 << 6  # forced pulled up, per PB6State
         self.ports: dict[str, PortIO] = {"A": PortIO(num_bits=8), "B": port_b}
+        self.pb7_audio = Pb7Audio(port_b)
 
     @property
     def connected(self) -> bool:
@@ -365,6 +422,15 @@ class Peripheral:
             io.momentary &= ~(1 << 6)
             self._send_bit(port, 6, io.driven_level(6))
 
+    def toggle_pb7_speaker(self, port: str) -> None:
+        """Flips PB7's panel-local audio-routing state -- never touches the wire.
+
+        Purely a local setting `Pb7Audio` reads each callback; there's no
+        VIA-side concept of "audio routing" to send.
+        """
+        io = self.ports[port]
+        io.pb7.speaker_on = not io.pb7.speaker_on
+
     def _send_ctrl(self, port: str, pin: int, level: bool) -> None:
         if not self._client.connected:
             return
@@ -378,6 +444,66 @@ class Peripheral:
 
     def close(self) -> None:
         self._client.close()
+        self.pb7_audio.close()
+
+
+class Pb7Audio:
+    """Reconstructs PB7's live wire level as a naive, non-band-limited square wave.
+
+    Per the design doc's "Audio output" section, this peripheral is
+    external to the emulator, so reconstruction is driven entirely by the
+    Set/Reset message stream for PB7 -- not in-process timing -- and reads
+    whatever `port_b.level`'s bit 7 currently is: the actual node level,
+    whichever side is driving it. No synthesis math is needed since the
+    signal is already a literal square wave; each output sample is just
+    +/-`PB7_AUDIO_AMPLITUDE` depending on that bit, muted to 0 whenever
+    `port_b.pb7.speaker_on` is off.
+
+    The audio callback runs on PortAudio's own thread, reading `port_b`'s
+    plain int/bool attributes that the pygame-thread main loop mutates
+    without a lock -- safe here only because CPython's GIL makes a single
+    attribute read/write atomic and there's no multi-step invariant being
+    read across two attributes at once (bit 7 of `level` and `speaker_on`
+    are each read independently, and either one glitching by at most one
+    sample block is inaudible). This is the first cross-thread state in
+    the whole codebase; don't assume this pattern generalizes to a future
+    case with a real invariant to protect.
+
+    Gracefully does nothing if `sounddevice`/PortAudio isn't usable in this
+    environment (no import, no audio device, construction/start failure)
+    -- audio is a nice-to-have on top of the panel, not a requirement to
+    run it, mirroring how the rest of the panel degrades (e.g. reconnect
+    backoff) rather than crashing on an unavailable resource.
+    """
+
+    def __init__(self, port_b: PortIO):
+        self._port_b = port_b
+        self._stream = None
+        if sd is None:
+            return
+        try:
+            stream = sd.OutputStream(
+                samplerate=PB7_AUDIO_SAMPLE_RATE, channels=1, dtype="float32", callback=self._callback,
+            )
+            stream.start()
+        except Exception:
+            return
+        self._stream = stream
+
+    def _callback(self, outdata, frames, time_info, status) -> None:
+        pb7 = self._port_b.pb7
+        if pb7 is not None and pb7.speaker_on and (self._port_b.level & 0x80):
+            outdata[:, 0] = PB7_AUDIO_AMPLITUDE
+        elif pb7 is not None and pb7.speaker_on:
+            outdata[:, 0] = -PB7_AUDIO_AMPLITUDE
+        else:
+            outdata[:, 0] = 0.0
+
+    def close(self) -> None:
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
 
 
 def run(args: argparse.Namespace) -> None:
@@ -386,7 +512,7 @@ def run(args: argparse.Namespace) -> None:
 
     ports = [
         cells.build_port_a(args.pa_direction),
-        cells.build_port_b(args.pb_direction, args.pb6_pulse_counting),
+        cells.build_port_b(args.pb_direction, args.pb6_pulse_counting, args.pb7_free_run),
     ]
     content_right = cells.layout_ports(ports, 0)
     window_size = (
@@ -419,6 +545,9 @@ def run(args: argparse.Namespace) -> None:
                 running = False
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 for cell in data_cells:
+                    if isinstance(cell, cells.PB7Cell) and cell.speaker_rect().collidepoint(event.pos):
+                        peripheral.toggle_pb7_speaker(cell.port)
+                        break
                     if cell.toggle_rect().collidepoint(event.pos):
                         if is_pb6_pulse_counting(cell):
                             peripheral.toggle_pb6_mode(cell.port)
@@ -464,6 +593,8 @@ def run(args: argparse.Namespace) -> None:
             cell.momentary_pressed = bool((io.momentary >> cell.bit) & 1)
             if is_pb6_pulse_counting(cell):
                 cell.mode = io.pb6.mode
+            if isinstance(cell, cells.PB7Cell):
+                cell.speaker_on = io.pb7.speaker_on
         for cell in ctrl_cells:
             state = peripheral.ports[cell.port].ctrl[cell.ctrl_pin]
             cell.mode = state.mode

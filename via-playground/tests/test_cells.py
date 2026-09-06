@@ -182,9 +182,9 @@ def test_build_port_a_cells_carry_port_letter():
 def test_build_port_b_pin_order_and_kinds():
     row = cells.build_port_b()
     names = [cell.name for cell in row]
-    assert names == ["PB6", "PB5", "PB4", "PB3", "PB2", "PB1", "PB0", "CB1", "CB2"]
+    assert names == ["PB7", "PB6", "PB5", "PB4", "PB3", "PB2", "PB1", "PB0", "CB1", "CB2"]
     kinds = [cell.kind for cell in row]
-    assert kinds == ["data"] * 7 + ["ctrl"] * 2
+    assert kinds == ["data"] * 8 + ["ctrl"] * 2
     assert all(cell.port == "B" for cell in row)
 
 
@@ -209,22 +209,30 @@ def test_build_port_is_the_shared_constructor_behind_build_port_a_and_b():
     generic_a_names = [cell.name for cell in cells.build_port("A", 8, 0xF0)]
     assert a_names == generic_a_names
 
-    # PB6 is layered on separately by build_port_b (see PB6Cell); the rest
-    # of the row still comes straight from the shared build_port.
-    b_names = [cell.name for cell in cells.build_port_b(0x38)][1:]
+    # PB6/PB7 are layered on separately by build_port_b (see PB6Cell,
+    # PB7Cell); the rest of the row still comes straight from the shared
+    # build_port.
+    b_names = [cell.name for cell in cells.build_port_b(0x38)][2:]
     generic_b_names = [cell.name for cell in cells.build_port("B", 6, 0x38)]
     assert b_names == generic_b_names
 
 
 def test_build_port_b_pb6_direction_follows_declared_mask():
-    row = cells.build_port_b(direction_mask=0b1000000)  # PB6 out; rest in
+    row = cells.build_port_b(direction_mask=0b01000000)  # PB6 out; rest in
     data_cells = {cell.name: cell for cell in row if cell.kind == "data"}
     assert data_cells["PB6"].direction == "out"
     assert data_cells["PB0"].direction == "in"
 
 
+def test_build_port_b_pb7_direction_follows_declared_mask():
+    row = cells.build_port_b(direction_mask=0b10000000)  # PB7 out; rest in
+    data_cells = {cell.name: cell for cell in row if cell.kind == "data"}
+    assert data_cells["PB7"].direction == "out"
+    assert data_cells["PB6"].direction == "in"
+
+
 def test_build_port_b_pb6_defaults_to_declared_pulse_counting():
-    pb6 = cells.build_port_b()[0]
+    pb6 = cells.build_port_b()[1]
     assert isinstance(pb6, cells.PB6Cell)
     assert pb6.pulse_counting is True
     # Forced pulled up at construction -- not something a toggle click set.
@@ -232,9 +240,43 @@ def test_build_port_b_pb6_defaults_to_declared_pulse_counting():
 
 
 def test_build_port_b_pb6_pulse_counting_can_be_declared_off():
-    pb6 = cells.build_port_b(pulse_counting=False)[0]
+    pb6 = cells.build_port_b(pulse_counting=False)[1]
     assert pb6.pulse_counting is False
     assert pb6.local is False
+
+
+def test_build_port_b_pb7_defaults_to_declared_free_run_off():
+    pb7 = cells.build_port_b()[0]
+    assert isinstance(pb7, cells.PB7Cell)
+    assert pb7.free_run is False
+    # PB7's local pull is an ordinary toggle -- never forced, unlike PB6.
+    assert pb7.local is False
+
+
+def test_build_port_b_pb7_free_run_can_be_declared_on():
+    pb7 = cells.build_port_b(free_run=True)[0]
+    assert pb7.free_run is True
+
+
+def test_pb7_speaker_rect_is_distinct_and_within_cell():
+    pb7 = cells.build_port_b()[0]
+    pb7.place(0)
+    speaker_rect = pb7.speaker_rect()
+    toggle_rect = pb7.toggle_rect()
+    momentary_rect = pb7.momentary_rect()
+    assert not speaker_rect.colliderect(toggle_rect)
+    assert not speaker_rect.colliderect(momentary_rect)
+    assert pb7.rect.contains(speaker_rect)
+    # toggle -> speaker -> momentary, top to bottom, per the shared
+    # gap-filler offset convention (POLARITY_OFF sits between TOGGLE_OFF
+    # and MOMENTARY_OFF).
+    assert toggle_rect.centery < speaker_rect.centery < momentary_rect.centery
+
+
+def test_pb7_speaker_rect_tracks_cell_placement():
+    pb7 = cells.build_port_b()[0]
+    pb7.place(40)
+    assert pb7.speaker_rect().centerx == pb7.rect.centerx
 
 
 def test_layout_ports_places_each_port_via_layout_row_with_a_port_gap_between():

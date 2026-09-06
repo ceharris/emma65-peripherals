@@ -6,7 +6,18 @@ import socket
 
 import pytest
 
-from emma65_via_playground.app import CTRL_PULSE_DURATION_MS, ControlPinState, Peripheral, parse_args
+import numpy as np
+
+from emma65_via_playground.app import (
+    CTRL_PULSE_DURATION_MS,
+    PB7_AUDIO_AMPLITUDE,
+    ControlPinState,
+    Pb7Audio,
+    Peripheral,
+    PortIO,
+    PB7State,
+    parse_args,
+)
 
 
 @pytest.fixture
@@ -60,7 +71,7 @@ def test_parse_args_rejects_non_hex_pa_direction():
 
 def test_parse_args_defaults_pb_direction():
     args = parse_args([])
-    assert args.pb_direction == 0x38
+    assert args.pb_direction == 0xB8
 
 
 def test_parse_args_accepts_hex_pb_direction():
@@ -76,6 +87,16 @@ def test_parse_args_defaults_pb6_pulse_counting_on():
 def test_parse_args_accepts_disabling_pb6_pulse_counting():
     args = parse_args(["--no-pb6-pulse-counting"])
     assert args.pb6_pulse_counting is False
+
+
+def test_parse_args_defaults_pb7_free_run_off():
+    args = parse_args([])
+    assert args.pb7_free_run is False
+
+
+def test_parse_args_accepts_enabling_pb7_free_run():
+    args = parse_args(["--pb7-free-run"])
+    assert args.pb7_free_run is True
 
 
 def test_port_levels_start_at_zero(connected_peripheral):
@@ -275,14 +296,15 @@ def test_reconnect_reasserts_local_and_momentary_state_for_all_owned_bits(via_se
     # by its (untouched) toggle position; CA1/CA2 are untouched, so they
     # reassert to their default (rising) polarity's idle-low level. Port B:
     # bit 2 is on, bit 6 (PB6) is forced high by its declared pulse-counting
-    # default, every other owned bit (0,1,3,4,5) is driven low; CB1/CB2 are
-    # likewise untouched.
+    # default, every other owned bit (0,1,3,4,5,7 -- PB7's toggle is
+    # untouched, ordinary low) is driven low; CB1/CB2 are likewise
+    # untouched.
     expected = (
         b"".join(b"SA02" if bit == 1 else b"RA%02X" % (1 << bit) for bit in range(8))
         + b"RCA1RCA2"
         + b"".join(
             b"SB04" if bit == 2 else b"SB40" if bit == 6 else b"RB%02X" % (1 << bit)
-            for bit in range(7)
+            for bit in range(8)
         )
         + b"RCB1RCB2"
     )
@@ -469,11 +491,12 @@ def test_reconnect_reasserts_control_pin_state(via_server):
     # own state (reconnecting doesn't cancel it) so it reasserts the active
     # level; every other control pin (CA2, CB1, CB2) is untouched and
     # reasserts its idle (rising-polarity, idle-low) level. Port B's bit 6
-    # (PB6) is forced high by its declared pulse-counting default.
+    # (PB6) is forced high by its declared pulse-counting default; every
+    # other owned bit, including PB7, is an untouched, ordinary low toggle.
     expected = (
         b"".join(b"RA%02X" % (1 << bit) for bit in range(8))
         + b"SCA1RCA2"
-        + b"".join(b"SB40" if bit == 6 else b"RB%02X" % (1 << bit) for bit in range(7))
+        + b"".join(b"SB40" if bit == 6 else b"RB%02X" % (1 << bit) for bit in range(8))
         + b"RCB1RCB2"
     )
     data = b""
@@ -574,6 +597,80 @@ def test_pressing_pb6_again_mid_pulse_restarts_the_timer(connected_peripheral):
 
     peripheral.close()
     conn.close()
+
+
+def test_pb7_uses_ordinary_toggle_and_momentary_wire_behavior(connected_peripheral):
+    # Unlike PB6, PB7's toggle/momentary are never repurposed -- bit 7
+    # behaves exactly like any other Port B data bit.
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_data("B", 7)
+    assert peripheral.ports["B"].local & 0x80
+    assert conn.recv(1024) == b"SB80"
+
+    peripheral.set_momentary("B", 7, True)
+    assert conn.recv(1024) == b"RB80"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_toggle_pb7_speaker_flips_local_state_without_touching_the_wire(connected_peripheral):
+    peripheral, conn = connected_peripheral
+    conn.setblocking(False)
+
+    assert peripheral.ports["B"].pb7.speaker_on is True
+    peripheral.toggle_pb7_speaker("B")
+    assert peripheral.ports["B"].pb7.speaker_on is False
+    peripheral.toggle_pb7_speaker("B")
+    assert peripheral.ports["B"].pb7.speaker_on is True
+
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+
+    peripheral.close()
+    conn.close()
+
+
+def test_pb7_free_run_declaration_does_not_affect_local_state(via_server):
+    sock_path, server = via_server
+    peripheral = Peripheral(parse_args(["--socket", sock_path, "--pb7-free-run"]))
+    peripheral.connect_if_needed(0)
+    server.accept()
+    assert peripheral.ports["B"].pb7.free_run is True
+    assert peripheral.ports["B"].local & 0x80 == 0  # PB7's toggle is untouched, ordinary low
+    peripheral.close()
+
+
+def test_pb7_audio_degrades_gracefully_without_portaudio():
+    # This dev/CI environment has no PortAudio library at all, so this
+    # exercises the real degrade path (sd is None), not just a mock.
+    audio = Pb7Audio(PortIO(pb7=PB7State(free_run=False)))
+    audio.close()  # must not raise even though no stream was ever opened
+
+
+def test_pb7_audio_callback_outputs_positive_amplitude_when_bit_high_and_routed():
+    port_b = PortIO(level=0x80, pb7=PB7State(free_run=False, speaker_on=True))
+    audio = Pb7Audio(port_b)
+    outdata = np.zeros((4, 1), dtype="float32")
+    audio._callback(outdata, 4, None, None)
+    assert (outdata[:, 0] == PB7_AUDIO_AMPLITUDE).all()
+
+
+def test_pb7_audio_callback_outputs_negative_amplitude_when_bit_low_and_routed():
+    port_b = PortIO(level=0x00, pb7=PB7State(free_run=False, speaker_on=True))
+    audio = Pb7Audio(port_b)
+    outdata = np.zeros((4, 1), dtype="float32")
+    audio._callback(outdata, 4, None, None)
+    assert (outdata[:, 0] == -PB7_AUDIO_AMPLITUDE).all()
+
+
+def test_pb7_audio_callback_is_silent_when_not_routed():
+    port_b = PortIO(level=0x80, pb7=PB7State(free_run=False, speaker_on=False))
+    audio = Pb7Audio(port_b)
+    outdata = np.zeros((4, 1), dtype="float32")
+    audio._callback(outdata, 4, None, None)
+    assert (outdata[:, 0] == 0.0).all()
 
 
 def test_toggle_pb6_mode_cancels_an_in_flight_pulse(connected_peripheral):
