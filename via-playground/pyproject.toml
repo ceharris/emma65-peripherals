@@ -8,6 +8,8 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "pygame-ce>=2.5",
+    "sounddevice>=0.4",
+    "numpy>=1.26",
     "emma65-via",
 ]
 

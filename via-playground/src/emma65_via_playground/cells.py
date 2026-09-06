@@ -17,7 +17,9 @@ separated by `PORT_GAP`) so a combined multi-port canvas is measured and
 placed the same drift-proof way checkpoint 2 established for one row.
 
 `PB6Cell` (Unit 8) is a thin `DataCell` decorator for PB6's layered T2
-pulse-counting capability -- see its own docstring.
+pulse-counting capability -- see its own docstring. `PB7Cell` (Unit 9) is
+the analogous decorator for PB7's T1 free-run informational indicator and
+audio-routing (speaker) control.
 """
 
 from __future__ import annotations
@@ -45,6 +47,11 @@ TOGGLE_OFF = (58, 62, 68)
 BTN = (70, 75, 82)
 BTN_EDGE = (98, 104, 112)
 ACCENT = (244, 196, 92)
+
+# PB7's audio-routing (speaker) icon -- a dedicated hue per checkpoint 2,
+# since LED green, direction blue/orange, and accent gold are all already
+# carrying other meanings.
+SPKR_ON = (176, 141, 235)
 
 # Glow-ring outer radius, as a multiple of the lit LED/momentary-button's own
 # radius -- shared by draw_led and draw_momentary per checkpoint 2's decision
@@ -185,6 +192,53 @@ def draw_pulse_icon(surf, cx, cy, w, h, polarity: Polarity):
     pygame.draw.line(surf, TEXT_DIM, (x1, excursion_y), (x2, excursion_y), 1)
     pygame.draw.line(surf, TEXT_DIM, (x2, excursion_y), (x2, idle_y), 1)
     pygame.draw.line(surf, TEXT_DIM, (x2, idle_y), (x3, idle_y), 1)
+
+
+def draw_speaker_icon(surf, cx, cy, on: bool, scale: float = 1.0) -> None:
+    # Modeled directly on a standard speaker glyph: a narrow box flaring
+    # into a wide cone, with wave arcs off the apex when routing is on. No
+    # background badge -- same "bare shape" treatment as the chevron and
+    # polarity icon (checkpoint 2's second design pass; a circular
+    # icon-button first attempt didn't read as a speaker at cell scale).
+    #
+    # The box+cone silhouette alone is horizontally symmetric, but the wave
+    # arcs only extend rightward from the apex -- so centering the box+cone
+    # at cx left the whole glyph, arcs included, visibly off-center when
+    # routing was on. Instead, the full bounding box for the current state
+    # (arcs included, when present) is centered at cx, so the box+cone
+    # shifts left to make room for the arcs on the right.
+    color = SPKR_ON if on else TEXT_DIM
+    box_w, cone_len = 7 * scale, 8 * scale
+    box_h, apex_h = 6 * scale, 13 * scale
+    arc_radii = (6 * scale, 11 * scale)
+
+    box_cone_w = box_w + cone_len
+    total_w = box_cone_w + (arc_radii[-1] if on else 0)
+    x0 = cx - total_w / 2
+    apex_x = x0 + box_cone_w
+
+    poly = [
+        (x0, cy - box_h), (x0 + box_w, cy - box_h),
+        (apex_x, cy - apex_h), (apex_x, cy + apex_h),
+        (x0 + box_w, cy + box_h), (x0, cy + box_h),
+    ]
+    pygame.draw.polygon(surf, color, poly)
+
+    if on:
+        for rad in arc_radii:
+            arc_rect = pygame.Rect(0, 0, rad * 2, rad * 2)
+            arc_rect.center = (apex_x, cy)
+            pygame.draw.arc(surf, color, arc_rect, -1.0, 1.0, max(2, int(3 * scale)))
+    else:
+        # Muted: a single diagonal stroke across the whole glyph, in a
+        # brighter contrasting color (TEXT, not TEXT_DIM) than the dimmed
+        # fill -- checkpoint 2 caught a first attempt that used the same
+        # dim color as the fill, which only read as a stray floating mark
+        # where it extended past the icon's own silhouette rather than a
+        # slash through it. Worth remembering for any icon with an on/off
+        # pair: render both states before calling either one settled.
+        lw = max(2, int(3 * scale))
+        pygame.draw.line(surf, TEXT, (x0, cy - apex_h), (apex_x, cy + apex_h), lw)
 
 
 UI_FONT = "Arial,Helvetica,DejaVu Sans,sans-serif"
@@ -373,6 +427,69 @@ class PB6Cell(DataCell):
         draw_momentary(surf, *momentary_rect.center, momentary_rect.width // 2, pressed=self.momentary_pressed)
 
 
+class PB7Cell(DataCell):
+    """PB7: full standard data-cell anatomy plus a T1 free-run indicator and a speaker icon.
+
+    Unlike PB6, PB7's toggle and momentary are never repurposed -- the
+    design doc is explicit that T1 driving PB7 is "the same 'pin can
+    diverge from local' story as any output pin," so this cell's ordinary
+    `DataCell` toggle/momentary interactivity is left untouched. Two extra,
+    independent widgets fill the gaps an ordinary `DataCell` leaves empty
+    between its toggle and momentary:
+
+    - `free_run` (declared, immutable after construction, same reasoning
+      as `PB6Cell.pulse_counting`): the VIA peer protocol never reports ACR
+      (see `emma65_via.protocol`'s module docstring and the Unit 8 PB6
+      precedent), so whether Timer 1 is actually in free-run/PB7-toggle
+      mode can't be read live -- there is also no wire-traffic signature
+      reliable enough to infer it (a human clicking the panel's own
+      momentary can produce similar-looking Set/Reset bursts). This is
+      shown as a small amber segment-display badge reading "T1", bright
+      when declared and dim otherwise -- reusing the same widget position
+      and visual language `PB6Cell`/`ControlCell` use for their own
+      mode-select displays, per checkpoint 2's request to converge on one
+      shared "special-case cell carries an extra gap-filling widget"
+      pattern rather than a third bespoke one. Unlike those, this badge is
+      purely informational (its text never changes; only its brightness
+      does) since there's nothing here for a click to toggle.
+    - `speaker_on` (panel-local, mutable via a click on the icon; never
+      sent over the wire): whether this panel's own audio-reconstruction
+      output is currently routed to the speaker. Rendered with
+      `draw_speaker_icon` at the same offset `ControlCell`'s polarity icon
+      uses, matching checkpoint 2's alignment of the row's single-item
+      gap-fillers.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        direction: Direction,
+        local: bool,
+        pin: bool,
+        free_run: bool,
+        speaker_on: bool = True,
+        momentary_pressed: bool = False,
+        bit: int | None = None,
+        port: str = "",
+    ):
+        super().__init__(name, direction, local, pin, momentary_pressed, bit, port)
+        self.free_run = free_run
+        self.speaker_on = speaker_on
+
+    def speaker_rect(self) -> pygame.Rect:
+        """Clickable area for the audio-routing speaker icon, for hit-testing."""
+        rect = pygame.Rect(0, 0, sc(30), sc(26))
+        rect.center = (self.rect.centerx, self.rect.top + POLARITY_OFF)
+        return rect
+
+    def _draw_body(self, surf, fonts: Fonts) -> None:
+        super()._draw_body(surf, fonts)
+        badge_color = SEG_ON if self.free_run else TEXT_DIM
+        draw_seg_display(surf, fonts.seg, self.rect.centerx, self.rect.top + SEG_OFF, "T1", color=badge_color)
+        speaker_rect = self.speaker_rect()
+        draw_speaker_icon(surf, *speaker_rect.center, on=self.speaker_on, scale=S)
+
+
 class ControlCell(Cell):
     """A control pin (CAx/CBx): mode toggle + PLS/LVL readout, polarity icon, momentary.
 
@@ -520,17 +637,18 @@ def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
     return build_port("A", 8, direction_mask)
 
 
-def build_port_b(direction_mask: int = 0x38, pulse_counting: bool = True) -> list[Cell]:
-    """Port B row: PB6 (see `PB6Cell`), PB5..PB0 (direction per
-    `direction_mask`), CB1, CB2.
+def build_port_b(
+    direction_mask: int = 0xB8, pulse_counting: bool = True, free_run: bool = False,
+) -> list[Cell]:
+    """Port B row: PB7 (see `PB7Cell`), PB6 (see `PB6Cell`), PB5..PB0
+    (direction per `direction_mask`), CB1, CB2.
 
-    PB7's special-case behavior (T1 free-run/audio) is Unit 9, so this
-    panel doesn't yet own or render that bit. PB0-PB5 and the control
-    cells come from the shared `build_port` constructor unchanged; PB6 is
-    layered on separately since its cell type (`PB6Cell`) and declared
-    `pulse_counting` setting are unique to this one bit. See `build_port`
-    for the shared semantics of `direction_mask` and `PB6Cell` for
-    `pulse_counting`.
+    PB0-PB5 and the control cells come from the shared `build_port`
+    constructor unchanged; PB6 and PB7 are layered on separately since
+    their cell types (`PB6Cell`, `PB7Cell`) and declared settings
+    (`pulse_counting`, `free_run`) are unique to those two bits. See
+    `build_port` for the shared semantics of `direction_mask`, `PB6Cell`
+    for `pulse_counting`, and `PB7Cell` for `free_run`.
     """
     port = build_port("B", 6, direction_mask & 0x3F)
     data_cells, ctrl_cells = port[:-2], port[-2:]
@@ -540,7 +658,13 @@ def build_port_b(direction_mask: int = 0x38, pulse_counting: bool = True) -> lis
         local=pulse_counting, pin=False, pulse_counting=pulse_counting,
         bit=6, port="B",
     )
-    return [pb6] + data_cells + ctrl_cells
+    pb7 = PB7Cell(
+        "PB7",
+        direction=("out" if (direction_mask >> 7) & 1 else "in"),
+        local=False, pin=False, free_run=free_run,
+        bit=7, port="B",
+    )
+    return [pb7, pb6] + data_cells + ctrl_cells
 
 
 def draw_status_bar(surf, fonts, title: str, width: int) -> None:
