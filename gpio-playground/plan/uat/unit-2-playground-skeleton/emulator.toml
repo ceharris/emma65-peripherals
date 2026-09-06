@@ -1,0 +1,19 @@
+cpu-variant = "WDC65C02"
+clock-speed-hz = 1843200
+
+[[devices]]
+type = "ram"
+address = 0x0000
+size = 0x0800
+
+[[devices]]
+type = "rom"
+address = 0xF000
+size = 0x1000
+image = "./unit2_uat.bin"
+
+[[devices]]
+type = "via/6522"
+address = 0x9000
+transport = "unix:~/.emma/sock/via6522"
+protocol = "ascii"

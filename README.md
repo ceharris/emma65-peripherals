@@ -15,6 +15,8 @@ Textual, curses, ...).
 
 - [`buttons`](buttons) (`emma65-buttons`) — a `pygame-ce` push button and
   toggle button wired to two VIA GPIO pins.
+- [`via-playground`](via-playground) (`emma65-via-playground`) — a `pygame-ce`
+  panel for observing and driving every pin of a VIA `6522` device.
 
 ## Shared packages
 

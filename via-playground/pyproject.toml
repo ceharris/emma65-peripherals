@@ -1,0 +1,22 @@
+[project]
+name = "emma65-via-playground"
+version = "0.1.0"
+description = "A VIA GPIO playground panel: observe and drive every pin of a via/6522 device"
+authors = [
+    { name = "Carl Harris", email = "ceharris414@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pygame-ce>=2.5",
+    "emma65-via",
+]
+
+[project.scripts]
+emma65-via-playground = "emma65_via_playground:main"
+
+[tool.uv.sources]
+emma65-via = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
