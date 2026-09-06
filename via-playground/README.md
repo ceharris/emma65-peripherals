@@ -6,10 +6,12 @@ client to the VIA's `unix:` transport and speaks the ASCII variant of the VIA
 Peer Protocol (see `doc/src/appendix-via-protocol.md` in the emma65 repo), via
 the shared `emma65-via` client library.
 
-This is Unit 2 of the [GPIO playground implementation
-plan](../gpio-playground/plan/via_gpio_playground_implementation_plan.md): it
-proves the connection plumbing end-to-end. The window shows connection status
-and draws nothing else yet -- pin cells and interactivity land in later units.
+This is Unit 3 of the [GPIO playground implementation
+plan](../gpio-playground/plan/via_gpio_playground_implementation_plan.md).
+The window renders a static Port A row (PA0-PA7, CA1, CA2) built on a
+reusable `Cell`/`DataCell`/`ControlCell` widget hierarchy (see
+`src/emma65_via_playground/cells.py`), plus connection status -- pin state is
+still placeholder data, and interactivity lands in later units.
 
 ## Running
 
