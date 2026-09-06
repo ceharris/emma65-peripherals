@@ -265,10 +265,25 @@ class DataCell(Cell):
     def _chevron_filled(self) -> bool:
         return self.pin
 
+    def toggle_rect(self) -> pygame.Rect:
+        """Clickable area for this cell's toggle switch, for hit-testing."""
+        rect = pygame.Rect(0, 0, sc(28), sc(15))
+        rect.center = (self.rect.centerx, self.rect.top + TOGGLE_OFF)
+        return rect
+
+    def momentary_rect(self) -> pygame.Rect:
+        """Clickable area for this cell's momentary button, for hit-testing."""
+        r = sc(12)
+        rect = pygame.Rect(0, 0, r * 2, r * 2)
+        rect.center = (self.rect.centerx, self.rect.top + MOMENTARY_OFF)
+        return rect
+
     def _draw_body(self, surf, fonts: Fonts) -> None:
         draw_led(surf, self.rect.centerx, self.rect.top + LED_OFF_DATA, sc(13), on=self.local)
-        draw_toggle(surf, self.rect.centerx, self.rect.top + TOGGLE_OFF, sc(28), sc(15), on=self.local)
-        draw_momentary(surf, self.rect.centerx, self.rect.top + MOMENTARY_OFF, sc(12), pressed=self.momentary_pressed)
+        toggle_rect = self.toggle_rect()
+        draw_toggle(surf, *toggle_rect.center, toggle_rect.width, toggle_rect.height, on=self.local)
+        momentary_rect = self.momentary_rect()
+        draw_momentary(surf, *momentary_rect.center, momentary_rect.width // 2, pressed=self.momentary_pressed)
 
 
 class ControlCell(Cell):
@@ -335,9 +350,9 @@ def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
     error -- the panel doesn't enforce correct configuration, mirroring real
     hardware.
 
-    `local` and `pin` both start low; `pin` is kept live by the caller from
-    VIA port-state events, while `local` stays this fixed default until
-    Unit 5 wires up toggle/momentary interactivity.
+    `local` and `pin` both start low; the caller keeps `pin` live from VIA
+    port-state events and `local`/`momentary_pressed` live from the panel's
+    own toggle/momentary interactivity (see `Peripheral` in `app.py`).
     """
     data_cells = [
         DataCell(f"PA{n}", direction=("out" if (direction_mask >> n) & 1 else "in"), local=False, pin=False, bit=n)

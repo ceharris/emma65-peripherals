@@ -58,7 +58,16 @@ class ViaAsciiClient:
         events: list[ViaEvent] = []
         try:
             while True:
-                data = self._sock.recv(4096)
+                try:
+                    data = self._sock.recv(4096)
+                except OSError as e:
+                    if isinstance(e, BlockingIOError):
+                        raise
+                    # A peer that closes with our unread bytes still in its receive
+                    # buffer sends a RST instead of a clean FIN, surfacing here as
+                    # e.g. ConnectionResetError rather than a plain EOF (b"").
+                    self.close()
+                    raise ConnectionError(str(e)) from e
                 if not data:
                     self.close()
                     raise ConnectionError("VIA connection closed")
