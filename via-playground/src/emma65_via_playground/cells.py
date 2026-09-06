@@ -38,6 +38,11 @@ BTN = (70, 75, 82)
 BTN_EDGE = (98, 104, 112)
 ACCENT = (244, 196, 92)
 
+# Glow-ring outer radius, as a multiple of the lit LED/momentary-button's own
+# radius -- shared by draw_led and draw_momentary per checkpoint 2's decision
+# to reuse the LED's glow styling for the momentary button.
+GLOW_RADIUS_SCALE = 1.3
+
 # "15-segment" mode display -- stylized stand-in, not real per-glyph segment
 # geometry (see checkpoint 2). Dark backlit rect + bold monospace text in an
 # LED/VFD-style amber.
@@ -94,7 +99,7 @@ def draw_text(surf, font, text, color, center=None, topleft=None):
 def draw_led(surf, cx, cy, r, on):
     color = LED_HIGH if on else LED_LOW
     if on:
-        glow_r = int(r * 1.6)
+        glow_r = int(r * GLOW_RADIUS_SCALE)
         glow = pygame.Surface((glow_r * 2, glow_r * 2), pygame.SRCALPHA)
         pygame.draw.circle(glow, (*color, 70), (glow_r, glow_r), glow_r)
         surf.blit(glow, (cx - glow_r, cy - glow_r))
@@ -114,7 +119,7 @@ def draw_momentary(surf, cx, cy, r, pressed=False):
     body = ACCENT if pressed else BTN
     edge = ACCENT if pressed else BTN_EDGE
     if pressed:
-        glow_r = int(r * 1.6)
+        glow_r = int(r * GLOW_RADIUS_SCALE)
         glow = pygame.Surface((glow_r * 2, glow_r * 2), pygame.SRCALPHA)
         pygame.draw.circle(glow, (*ACCENT, 70), (glow_r, glow_r), glow_r)
         surf.blit(glow, (cx - glow_r, cy - glow_r))
