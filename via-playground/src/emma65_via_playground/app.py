@@ -1,10 +1,9 @@
 """VIA GPIO playground: a panel for observing and driving every pin of a via/6522 device.
 
 Connects to a `via/6522` device's `unix:` transport and speaks the VIA peer
-protocol's ASCII encoding via `emma65_via`. This unit only proves the
-connection plumbing end-to-end -- it opens a window, shows connection
-status, and draws nothing else. Pin cells and interactivity land in later
-units.
+protocol's ASCII encoding via `emma65_via`. This unit renders a static
+placeholder Port A row (see `cells.py`) on top of the connection plumbing --
+no live VIA data or interactivity yet, that lands in later units.
 """
 
 from __future__ import annotations
@@ -16,12 +15,12 @@ import pygame
 
 from emma65_via import ViaAsciiClient
 
+from . import cells
+
 DEFAULT_SOCKET = "~/.emma/sock/via6522"
 RECONNECT_INTERVAL_MS = 1000
 
-WINDOW_SIZE = (480, 270)
-BG_COLOR = (24, 24, 28)
-TEXT_COLOR = (230, 230, 230)
+FOOTER_H = cells.sc(24)
 CONNECTED_COLOR = (120, 200, 140)
 DISCONNECTED_COLOR = (210, 100, 100)
 
@@ -67,9 +66,19 @@ class Peripheral:
 def run(args: argparse.Namespace) -> None:
     pygame.init()
     pygame.display.set_caption("emma65 VIA GPIO playground")
-    screen = pygame.display.set_mode(WINDOW_SIZE)
+
+    port_a = cells.build_port_a()
+    content_right = cells.layout_row(port_a, 0)
+    window_size = (
+        cells.LEFT_MARGIN + content_right + cells.LEFT_MARGIN,
+        cells.CONTENT_HEIGHT + FOOTER_H,
+    )
+    screen = pygame.display.set_mode(window_size)
+    cells.layout_row(port_a, cells.LEFT_MARGIN)
+
     clock = pygame.time.Clock()
-    status_font = pygame.font.SysFont(None, 28)
+    fonts = cells.Fonts()
+    status_font = pygame.font.SysFont("Consolas,Menlo,monospace", cells.sc(12))
 
     peripheral = Peripheral(args)
 
@@ -84,11 +93,17 @@ def run(args: argparse.Namespace) -> None:
 
         peripheral.poll()
 
-        screen.fill(BG_COLOR)
+        screen.fill(cells.BG)
+        cells.draw_status_bar(screen, fonts, "PORT A", window_size[0])
+        for cell in port_a:
+            cell.draw(screen, fonts)
+
         status = "connected" if peripheral.connected else "connecting..."
         color = CONNECTED_COLOR if peripheral.connected else DISCONNECTED_COLOR
-        status_text = status_font.render(f"{status}  ({args.socket})", True, color)
-        screen.blit(status_text, status_text.get_rect(center=(WINDOW_SIZE[0] // 2, WINDOW_SIZE[1] // 2)))
+        cells.draw_text(
+            screen, status_font, f"{status}  ({args.socket})", color,
+            topleft=(cells.LEFT_MARGIN, cells.CONTENT_HEIGHT + cells.sc(4)),
+        )
 
         pygame.display.flip()
         clock.tick(60)
