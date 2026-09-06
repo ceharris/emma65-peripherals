@@ -5,16 +5,22 @@
 ;
 ; Configures DDRA to $F0 (PA7-4 out, PA3-0 in), matching the playground's
 ; default --pa-direction, and walks a single bit through PA7-4 once a
-; second so the panel's live chevron fill has real traffic to track.
+; second, four times, so the panel's live chevron fill has real traffic to
+; track.
 ;
-; After a few cycles, it flips DDRA to $0F -- the *opposite* of what the
-; panel still declares via --pa-direction -- and starts walking the bit
-; through PA3-0 instead. This deliberately makes the panel's declared
-; direction wrong: PA3-0 are now actually VIA outputs even though the panel
-; still draws them as inputs. Since Unit 4 has no local drive of its own
-; yet (that's Unit 5), nothing overloads -- but the chevron *fill* for
-; PA3-0 should still track the real traffic, proving fill is read from live
-; VIA state regardless of what direction the panel assumes.
+; It then flips DDRA to $0F -- the *opposite* of what the panel still
+; declares via --pa-direction -- and walks a bit through PA3-0 the same
+; way, four times. This deliberately makes the panel's declared direction
+; wrong: PA3-0 are now actually VIA outputs even though the panel still
+; draws them as inputs. Since Unit 4 has no local drive of its own yet
+; (that's Unit 5), nothing overloads -- but the chevron *fill* for PA3-0
+; should still track the real traffic, proving fill is read from live VIA
+; state regardless of what direction the panel assumes.
+;
+; The whole thing (upper nibble, then lower nibble, ~8s total) repeats
+; forever, rather than transitioning once and settling into a permanent
+; state -- so there's no race between starting the emulator and starting
+; the peripheral to catch the upper-nibble phase.
 
 .setcpu "w65c02"
 
@@ -34,6 +40,8 @@ TIMER_PERIOD = 18432   ; ~10ms at the profiles' usual 1.8432MHz PHI2
 .global main
 main:
     stz VIA_ACR              ; Timer 1 one-shot mode (re-armed by delay's outer loop)
+
+main_loop:
     lda #$F0
     sta VIA_DDRA              ; PA7-4 out, PA3-0 in -- matches default --pa-direction
 
@@ -56,8 +64,9 @@ main:
     sta VIA_DDRA              ; now PA3-0 out, PA7-4 in -- opposite of the
                                ; panel's still-declared --pa-direction $F0
 
+    ldx #4                    ; four walking-bit cycles through the lower nibble
     lda #$01
-forever:
+@lower_loop:
     sta VIA_ORA
     pha
     lda #100
@@ -67,7 +76,10 @@ forever:
     and #$0F
     bne :+
     lda #$01                 ; wrapped past bit 3 -- restart at bit 0
-:   bra forever
+:   dex
+    bne @lower_loop
+
+    bra main_loop
 
 ; Uses VIA Timer 1 to delay for at least A * 10ms.
 delay:
