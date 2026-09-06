@@ -38,6 +38,11 @@ BTN = (70, 75, 82)
 BTN_EDGE = (98, 104, 112)
 ACCENT = (244, 196, 92)
 
+# Glow-ring outer radius, as a multiple of the lit LED/momentary-button's own
+# radius -- shared by draw_led and draw_momentary per checkpoint 2's decision
+# to reuse the LED's glow styling for the momentary button.
+GLOW_RADIUS_SCALE = 1.3
+
 # "15-segment" mode display -- stylized stand-in, not real per-glyph segment
 # geometry (see checkpoint 2). Dark backlit rect + bold monospace text in an
 # LED/VFD-style amber.
@@ -94,7 +99,7 @@ def draw_text(surf, font, text, color, center=None, topleft=None):
 def draw_led(surf, cx, cy, r, on):
     color = LED_HIGH if on else LED_LOW
     if on:
-        glow_r = int(r * 1.6)
+        glow_r = int(r * GLOW_RADIUS_SCALE)
         glow = pygame.Surface((glow_r * 2, glow_r * 2), pygame.SRCALPHA)
         pygame.draw.circle(glow, (*color, 70), (glow_r, glow_r), glow_r)
         surf.blit(glow, (cx - glow_r, cy - glow_r))
@@ -114,7 +119,7 @@ def draw_momentary(surf, cx, cy, r, pressed=False):
     body = ACCENT if pressed else BTN
     edge = ACCENT if pressed else BTN_EDGE
     if pressed:
-        glow_r = int(r * 1.6)
+        glow_r = int(r * GLOW_RADIUS_SCALE)
         glow = pygame.Surface((glow_r * 2, glow_r * 2), pygame.SRCALPHA)
         pygame.draw.circle(glow, (*ACCENT, 70), (glow_r, glow_r), glow_r)
         surf.blit(glow, (cx - glow_r, cy - glow_r))
@@ -265,10 +270,25 @@ class DataCell(Cell):
     def _chevron_filled(self) -> bool:
         return self.pin
 
+    def toggle_rect(self) -> pygame.Rect:
+        """Clickable area for this cell's toggle switch, for hit-testing."""
+        rect = pygame.Rect(0, 0, sc(28), sc(15))
+        rect.center = (self.rect.centerx, self.rect.top + TOGGLE_OFF)
+        return rect
+
+    def momentary_rect(self) -> pygame.Rect:
+        """Clickable area for this cell's momentary button, for hit-testing."""
+        r = sc(12)
+        rect = pygame.Rect(0, 0, r * 2, r * 2)
+        rect.center = (self.rect.centerx, self.rect.top + MOMENTARY_OFF)
+        return rect
+
     def _draw_body(self, surf, fonts: Fonts) -> None:
         draw_led(surf, self.rect.centerx, self.rect.top + LED_OFF_DATA, sc(13), on=self.local)
-        draw_toggle(surf, self.rect.centerx, self.rect.top + TOGGLE_OFF, sc(28), sc(15), on=self.local)
-        draw_momentary(surf, self.rect.centerx, self.rect.top + MOMENTARY_OFF, sc(12), pressed=self.momentary_pressed)
+        toggle_rect = self.toggle_rect()
+        draw_toggle(surf, *toggle_rect.center, toggle_rect.width, toggle_rect.height, on=self.local)
+        momentary_rect = self.momentary_rect()
+        draw_momentary(surf, *momentary_rect.center, momentary_rect.width // 2, pressed=self.momentary_pressed)
 
 
 class ControlCell(Cell):
@@ -335,9 +355,9 @@ def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
     error -- the panel doesn't enforce correct configuration, mirroring real
     hardware.
 
-    `local` and `pin` both start low; `pin` is kept live by the caller from
-    VIA port-state events, while `local` stays this fixed default until
-    Unit 5 wires up toggle/momentary interactivity.
+    `local` and `pin` both start low; the caller keeps `pin` live from VIA
+    port-state events and `local`/`momentary_pressed` live from the panel's
+    own toggle/momentary interactivity (see `Peripheral` in `app.py`).
     """
     data_cells = [
         DataCell(f"PA{n}", direction=("out" if (direction_mask >> n) & 1 else "in"), local=False, pin=False, bit=n)

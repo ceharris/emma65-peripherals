@@ -107,3 +107,23 @@ def test_build_port_a_data_cells_carry_their_bit_index():
     for cell in row:
         if cell.kind == "data":
             assert cell.bit == int(cell.name.removeprefix("PA"))
+
+
+def test_toggle_rect_and_momentary_rect_are_distinct_and_within_cell():
+    cell = make_data_cell()
+    cell.place(0)
+    toggle_rect = cell.toggle_rect()
+    momentary_rect = cell.momentary_rect()
+    assert not toggle_rect.colliderect(momentary_rect)
+    assert cell.rect.contains(toggle_rect)
+    assert cell.rect.contains(momentary_rect)
+    # Toggle sits above the momentary button, per the settled label -> chevron
+    # -> LED -> toggle -> momentary stacking order.
+    assert toggle_rect.centery < momentary_rect.centery
+
+
+def test_toggle_and_momentary_rects_track_cell_placement():
+    cell = make_data_cell()
+    cell.place(40)
+    assert cell.toggle_rect().centerx == cell.rect.centerx
+    assert cell.momentary_rect().centerx == cell.rect.centerx

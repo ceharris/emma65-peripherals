@@ -124,7 +124,9 @@ pin's brief pulse looks like" rather than an abstract direction glyph.
   polarity icon need the room to avoid feeling cramped.
 - LED glow ring was scaled down from a very prominent 4×-radius halo to a
   subtler 1.6×-radius one; same treatment now reused for the momentary
-  button's "pressed" glow.
+  button's "pressed" glow. (Reduced again during Unit 5's real-code
+  iteration to 1.3× -- see `cells.GLOW_RADIUS_SCALE`, shared by `draw_led`
+  and `draw_momentary` so the two stay in sync.)
 
 ## Open questions / not yet addressed
 

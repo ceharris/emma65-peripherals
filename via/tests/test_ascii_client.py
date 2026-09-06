@@ -89,6 +89,19 @@ def test_poll_raises_connection_error_when_peer_closes(connected_pair):
     assert not client.connected
 
 
+def test_poll_raises_connection_error_when_peer_closes_with_unread_bytes(connected_pair):
+    # A peer that closes while bytes we sent are still unread in its receive
+    # buffer sends a RST rather than a clean FIN -- recv() surfaces that as
+    # e.g. ConnectionResetError, not a plain EOF (b""). poll() must still
+    # close the client and raise ConnectionError, the same as a clean close.
+    client, conn = connected_pair
+    client.set_bits("A", 0x01)  # left unread in conn's receive buffer
+    conn.close()
+    with pytest.raises(ConnectionError):
+        client.poll()
+    assert not client.connected
+
+
 def test_poll_decoder_state_is_reset_on_reconnect(tmp_path):
     sock_path = str(tmp_path / "via.sock")
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

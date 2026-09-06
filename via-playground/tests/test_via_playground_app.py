@@ -27,6 +27,7 @@ def connected_peripheral(via_server):
     peripheral = Peripheral(parse_args(["--socket", sock_path]))
     peripheral.connect_if_needed(0)
     conn, _ = server.accept()
+    conn.recv(1024)  # discard the initial connect-time reassertion of default (all-low) state
     yield peripheral, conn
     peripheral.close()
     conn.close()
@@ -140,3 +141,109 @@ def test_reconnect_respects_backoff_interval(tmp_path):
     # Still within the backoff window: no new attempt, still not connected.
     peripheral.connect_if_needed(500)
     assert not peripheral.connected
+
+
+def test_toggle_pa_flips_local_state_and_sends_bit(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_pa(3)
+    assert peripheral.pa_local == 0x08
+    assert conn.recv(1024) == b"SA08"
+
+    peripheral.toggle_pa(3)
+    assert peripheral.pa_local == 0x00
+    assert conn.recv(1024) == b"RA08"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_toggle_pa_only_touches_its_own_bit(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_pa(0)
+    conn.recv(1024)
+    peripheral.toggle_pa(5)
+    assert conn.recv(1024) == b"SA20"
+    assert peripheral.pa_local == 0x21
+
+    peripheral.close()
+    conn.close()
+
+
+def test_momentary_press_asserts_opposite_of_toggle_level(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    # Toggle off (local low): momentary press should drive high.
+    peripheral.set_pa_momentary(2, True)
+    assert conn.recv(1024) == b"SA04"
+
+    # Release: back to the toggle's (low) level.
+    peripheral.set_pa_momentary(2, False)
+    assert conn.recv(1024) == b"RA04"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_momentary_press_with_toggle_on_asserts_low(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_pa(4)
+    assert conn.recv(1024) == b"SA10"
+
+    peripheral.set_pa_momentary(4, True)
+    assert conn.recv(1024) == b"RA10"
+
+    peripheral.set_pa_momentary(4, False)
+    assert conn.recv(1024) == b"SA10"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_momentary_is_a_noop_when_state_unchanged(connected_peripheral):
+    peripheral, conn = connected_peripheral
+    conn.setblocking(False)
+
+    peripheral.set_pa_momentary(1, False)  # already released: must send nothing
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+
+    peripheral.close()
+    conn.close()
+
+
+def test_reconnect_reasserts_local_and_momentary_state_for_all_bits(via_server):
+    sock_path, server = via_server
+    peripheral = Peripheral(parse_args(["--socket", sock_path]))
+
+    peripheral.connect_if_needed(0)
+    conn, _ = server.accept()
+    conn.recv(1024)  # discard the initial connect-time reassertion (all bits low)
+
+    peripheral.toggle_pa(1)
+    peripheral.toggle_pa(6)
+    peripheral.set_pa_momentary(6, True)  # overrides bit 6 back to low
+    conn.recv(1024)  # discard those three interaction messages
+
+    conn.close()
+    peripheral.poll()
+    assert not peripheral.connected
+
+    peripheral.connect_if_needed(0)
+    conn2, _ = server.accept()
+
+    # Bit 1's toggle is on (driven high); bit 6's toggle is also on, but its
+    # momentary press overrides it back to driven-low; every other bit is
+    # driven low by its (untouched) toggle position.
+    expected = b"".join(
+        b"SA02" if bit == 1 else b"RA%02X" % (1 << bit) for bit in range(8)
+    )
+    data = b""
+    while len(data) < len(expected):
+        data += conn2.recv(1024)
+    assert data == expected
+
+    peripheral.close()
+    conn2.close()
