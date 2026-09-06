@@ -246,12 +246,17 @@ class Cell:
 
 
 class DataCell(Cell):
-    """A data pin (PAx/PBx): LED (local pull), toggle, momentary button.
+    """A data pin (PAx/PBx): LED (driven output), toggle (local pull), momentary button.
 
-    LED and toggle both reflect `local` -- the level the panel's own
-    toggle pulls the pin toward. `pin` is the actual node level the VIA
-    sees, shown by the chevron; it can diverge from `local` on an output
-    pin (pull-up/down losing to an active VIA driver, or contention).
+    The toggle reflects `local` -- the level the panel's own toggle pulls
+    the pin toward. The LED reflects `driven` -- what the panel is actually
+    asserting onto the pin right now, which is `local` unless a held
+    momentary button is overriding it to the opposite level (so pressing
+    momentary on a pulled-up pin dims the LED, and on a pulled-down pin
+    lights it -- the LED must visibly move the instant the momentary is
+    pressed, not just show toggle position). `pin` is the actual node level
+    the VIA sees, shown by the chevron; it can diverge from `driven` on an
+    output pin (pull-up/down losing to an active VIA driver, or contention).
     """
 
     kind = "data"
@@ -276,6 +281,13 @@ class DataCell(Cell):
     def width(self) -> int:
         return data_w
 
+    @property
+    def driven(self) -> bool:
+        """The level this cell is actually asserting onto the pin right now:
+        `local`, unless a held momentary button is overriding it to the
+        opposite level for its duration."""
+        return self.local != self.momentary_pressed
+
     def _chevron_filled(self) -> bool:
         return self.pin
 
@@ -293,7 +305,7 @@ class DataCell(Cell):
         return rect
 
     def _draw_body(self, surf, fonts: Fonts) -> None:
-        draw_led(surf, self.rect.centerx, self.rect.top + LED_OFF_DATA, sc(13), on=self.local)
+        draw_led(surf, self.rect.centerx, self.rect.top + LED_OFF_DATA, sc(13), on=self.driven)
         toggle_rect = self.toggle_rect()
         draw_toggle(surf, *toggle_rect.center, toggle_rect.width, toggle_rect.height, on=self.local)
         momentary_rect = self.momentary_rect()

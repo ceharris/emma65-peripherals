@@ -11,11 +11,17 @@
 ; README.md). Leaves PCR at its reset default ($00), making CA1/CA2/CB1/CB2
 ; all negative-edge-sensitive interrupt inputs, same as Unit 6.
 ;
-; Polls ORA/ORB for changes and IFR for CA1/CA2/CB1/CB2 edges, printing to
+; Polls IFR for CA1/CA2/CB1/CB2 edges and ORA/ORB for changes, printing to
 ; the console whenever any of them fires:
+;   Cxx  - IFR & $1B just went nonzero (bit0=CA2 bit1=CA1 bit3=CB2 bit4=CB1)
 ;   Axx  - Port A's live level (ORA) changed to xx
 ;   Bxx  - Port B's live level (ORB) changed to xx
-;   Cxx  - IFR & $1B just went nonzero (bit0=CA2 bit1=CA1 bit3=CB2 bit4=CB1)
+;
+; IFR is checked *before* ORA/ORB each iteration, and must stay that way:
+; with PCR left at $00, CA1/CB1's flags are unconditionally cleared by any
+; ORA/ORB access, and CA2/CB2's are cleared too since PCR's independent-mode
+; bits (bit3 for CA2, bit7 for CB2) are also 0. Reading ORA/ORB before
+; checking IFR would silently wipe a control-pin edge before it's ever seen.
 
 .setcpu "w65c02"
 
@@ -46,7 +52,25 @@ main:
     sta last_a
     sta last_b                  ; force the first poll to print both ports' levels
 
+; Order matters here: with PCR left at $00, CA1/CB1's IFR flags are
+; unconditionally cleared by any ORA/ORB access, and CA2/CB2's are cleared
+; too since PCR's independent-mode bits (bit3 for CA2, bit7 for CB2) are
+; also 0 -- so IFR must be checked (and any set bits printed+cleared)
+; *before* this same iteration touches ORA/ORB, or a control-pin edge that
+; landed since the last iteration gets silently wiped by the ORA/ORB read
+; below before ever being seen.
 poll_loop:
+    lda VIA_IFR
+    and #$1B                   ; bit0=CA2 bit1=CA1 bit3=CB2 bit4=CB1
+    beq check_a
+    sta pending_flags
+    lda #'C'
+    sta CONSOLE_DATA
+    lda pending_flags
+    jsr print_hex_byte
+    lda pending_flags
+    sta VIA_IFR                 ; write 1s back to the bits we just saw -- clears them
+check_a:
     lda VIA_ORA
     cmp last_a
     beq check_b
@@ -58,23 +82,12 @@ poll_loop:
 check_b:
     lda VIA_ORB
     cmp last_b
-    beq check_ctrl
+    beq poll_loop
     sta last_b
     lda #'B'
     sta CONSOLE_DATA
     lda last_b
     jsr print_hex_byte
-check_ctrl:
-    lda VIA_IFR
-    and #$1B                   ; bit0=CA2 bit1=CA1 bit3=CB2 bit4=CB1
-    beq poll_loop
-    sta pending_flags
-    lda #'C'
-    sta CONSOLE_DATA
-    lda pending_flags
-    jsr print_hex_byte
-    lda pending_flags
-    sta VIA_IFR                 ; write 1s back to the bits we just saw -- clears them
     bra poll_loop
 
 ; Prints A as two upper-case hex digits followed by CRLF, via the console

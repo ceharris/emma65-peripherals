@@ -19,10 +19,18 @@ makes CA1/CA2/CB1/CB2 all negative-edge-sensitive interrupt inputs (same as
 Unit 6, just now covering both ports' control pins). It prints to the
 emulator's `console` device whenever:
 
-- `Axx` -- Port A's live level (ORA) changed to `xx`
-- `Bxx` -- Port B's live level (ORB) changed to `xx`
 - `Cxx` -- `IFR & $1B` just went nonzero (bit0=CA2, bit1=CA1, bit3=CB2,
   bit4=CB1), immediately cleared after printing
+- `Axx` -- Port A's live level (ORA) changed to `xx`
+- `Bxx` -- Port B's live level (ORB) changed to `xx`
+
+**IFR is checked before ORA/ORB on every poll iteration, and that order
+matters**: with PCR left at `$00`, CA1/CB1's flags are unconditionally
+cleared by any ORA/ORB access, and CA2/CB2's are cleared too since PCR's
+independent-mode bits are also 0. An earlier version of this ROM read
+ORA/ORB first, which silently wiped control-pin edges before the code ever
+checked for them -- symptom was clicking CB1/CB2 repeatedly with no `Cxx`
+printed. If you see that symptom again, suspect this ordering first.
 
 **PA7-PA4 and PB5-PB3 are declared VIA outputs and this ROM never drives
 them, so they read back low regardless of the panel's toggle -- that's

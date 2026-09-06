@@ -82,6 +82,20 @@ def test_data_cell_chevron_filled_reflects_pin_not_local():
     assert cell._chevron_filled() is False
 
 
+def test_data_cell_driven_reflects_local_when_momentary_not_held():
+    assert cells.DataCell("PA0", direction="out", local=True, pin=True).driven is True
+    assert cells.DataCell("PA0", direction="out", local=False, pin=False).driven is False
+
+
+def test_data_cell_driven_is_inverted_while_momentary_held():
+    # Pulled up + momentary pressed: LED must go from lit to unlit.
+    cell = cells.DataCell("PA0", direction="out", local=True, pin=True, momentary_pressed=True)
+    assert cell.driven is False
+    # Pulled down + momentary pressed: LED must go from unlit to lit.
+    cell = cells.DataCell("PA0", direction="out", local=False, pin=False, momentary_pressed=True)
+    assert cell.driven is True
+
+
 def test_control_cell_chevron_is_always_placeholder_outline():
     # Direction is context-dependent on live PCR state, not derived yet --
     # the chevron is a deliberate always-outlined placeholder (checkpoint 1).
