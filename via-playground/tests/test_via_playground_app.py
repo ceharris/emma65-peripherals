@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import socket
+import threading
+import time
 
 import pytest
 
 import numpy as np
 
+from emma65_via_playground import app
 from emma65_via_playground.app import (
     CTRL_PULSE_DURATION_MS,
     PB7_AUDIO_AMPLITUDE,
@@ -18,6 +21,25 @@ from emma65_via_playground.app import (
     PB7State,
     parse_args,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_audio_hardware(monkeypatch):
+    """Force Pb7Audio's no-PortAudio degrade path for every test in this module.
+
+    Every `Peripheral()` construction builds a real `Pb7Audio`, which opens
+    an actual hardware audio stream whenever PortAudio happens to be
+    installed on the machine running the tests -- not hermetic, and
+    genuinely hangs after enough rapid open/close cycles across dozens of
+    tests (observed directly: this suite wedged the moment `libportaudio2`
+    got installed on a dev machine that previously lacked it, with no
+    change to the test code itself). No test in this file needs a real
+    stream -- Pb7Audio-specific tests below exercise `_callback`/
+    `_read_loop` directly -- so unconditionally patching `sd` to `None`
+    here restores the rest of the suite to being independent of whatever
+    audio hardware/drivers happen to be present.
+    """
+    monkeypatch.setattr(app, "sd", None)
 
 
 @pytest.fixture
@@ -643,34 +665,133 @@ def test_pb7_free_run_declaration_does_not_affect_local_state(via_server):
 
 
 def test_pb7_audio_degrades_gracefully_without_portaudio():
-    # This dev/CI environment has no PortAudio library at all, so this
-    # exercises the real degrade path (sd is None), not just a mock.
-    audio = Pb7Audio(PortIO(pb7=PB7State(free_run=False)))
-    audio.close()  # must not raise even though no stream was ever opened
+    # sd is forced to None module-wide (see _no_real_audio_hardware) -- this
+    # exercises the real degrade path, not just a mock. The reader thread
+    # must never start either, since sd is None short-circuits __init__
+    # before it's spawned.
+    audio = Pb7Audio(PortIO(pb7=PB7State(free_run=False)), "/nonexistent")
+    assert audio._reader_thread is None
+    audio.close()  # must not raise even though no stream/thread was ever started
 
 
-def test_pb7_audio_callback_outputs_positive_amplitude_when_bit_high_and_routed():
-    port_b = PortIO(level=0x80, pb7=PB7State(free_run=False, speaker_on=True))
-    audio = Pb7Audio(port_b)
+def test_pb7_audio_callback_outputs_positive_amplitude_when_bit_high_and_routed(monkeypatch):
+    # A controllable fake clock lets the test move past the jitter-buffer
+    # delay deterministically instead of racing a real one.
+    fake_time = [0.0]
+    monkeypatch.setattr(app.time, "perf_counter", lambda: fake_time[0])
+
+    port_b = PortIO(pb7=PB7State(free_run=False, speaker_on=True))
+    audio = Pb7Audio(port_b, "/nonexistent")
+    audio._on_edge(True, fake_time[0])
+    fake_time[0] += 0.020  # past PB7_AUDIO_JITTER_MS (15ms), so the read position has caught up
+
     outdata = np.zeros((4, 1), dtype="float32")
     audio._callback(outdata, 4, None, None)
     assert (outdata[:, 0] == PB7_AUDIO_AMPLITUDE).all()
 
 
-def test_pb7_audio_callback_outputs_negative_amplitude_when_bit_low_and_routed():
-    port_b = PortIO(level=0x00, pb7=PB7State(free_run=False, speaker_on=True))
-    audio = Pb7Audio(port_b)
+def test_pb7_audio_callback_outputs_negative_amplitude_when_bit_low_and_routed(monkeypatch):
+    fake_time = [0.0]
+    monkeypatch.setattr(app.time, "perf_counter", lambda: fake_time[0])
+
+    port_b = PortIO(pb7=PB7State(free_run=False, speaker_on=True))
+    audio = Pb7Audio(port_b, "/nonexistent")
+    audio._on_edge(False, fake_time[0])
+    fake_time[0] += 0.020
+
     outdata = np.zeros((4, 1), dtype="float32")
     audio._callback(outdata, 4, None, None)
     assert (outdata[:, 0] == -PB7_AUDIO_AMPLITUDE).all()
 
 
-def test_pb7_audio_callback_is_silent_when_not_routed():
-    port_b = PortIO(level=0x80, pb7=PB7State(free_run=False, speaker_on=False))
-    audio = Pb7Audio(port_b)
+def test_pb7_audio_callback_is_silent_when_not_routed(monkeypatch):
+    fake_time = [0.0]
+    monkeypatch.setattr(app.time, "perf_counter", lambda: fake_time[0])
+
+    port_b = PortIO(pb7=PB7State(free_run=False, speaker_on=False))
+    audio = Pb7Audio(port_b, "/nonexistent")
+    audio._on_edge(True, fake_time[0])
+    fake_time[0] += 0.020
+
     outdata = np.zeros((4, 1), dtype="float32")
     audio._callback(outdata, 4, None, None)
     assert (outdata[:, 0] == 0.0).all()
+
+
+def test_pb7_audio_callback_is_silent_before_the_first_edge():
+    # _t0 is None until the reader thread observes a first transition --
+    # the callback must not divide by/index against an origin that doesn't
+    # exist yet.
+    port_b = PortIO(pb7=PB7State(free_run=False, speaker_on=True))
+    audio = Pb7Audio(port_b, "/nonexistent")
+    outdata = np.full((4, 1), 1.0, dtype="float32")
+    audio._callback(outdata, 4, None, None)
+    assert (outdata[:, 0] == 0.0).all()
+
+
+def test_pb7_audio_reader_loop_tracks_bit7_via_its_own_dedicated_connection(via_server):
+    # This exercises _read_loop directly (bypassing the sd-is-None gate in
+    # __init__, forced by _no_real_audio_hardware) against a second,
+    # independent fake-VIA connection -- proving the dedicated-connection
+    # design actually works, not just that _on_edge's/_callback's
+    # arithmetic is right in isolation.
+    sock_path, server = via_server
+    port_b = PortIO(pb7=PB7State(free_run=False, speaker_on=True))
+    audio = Pb7Audio(port_b, sock_path)
+    reader = threading.Thread(target=audio._read_loop, daemon=True)
+    reader.start()
+    conn, _ = server.accept()
+
+    def wait_for(predicate, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.001)
+        return False
+
+    conn.sendall(b"B80")  # PortState: Port B = 0x80, bit 7 high
+    assert wait_for(lambda: audio._level == PB7_AUDIO_AMPLITUDE)
+
+    conn.sendall(b"RB80")  # PortBitsReset: bit 7 low
+    assert wait_for(lambda: audio._level == -PB7_AUDIO_AMPLITUDE)
+
+    conn.sendall(b"SB80")  # PortBitsSet: bit 7 high again
+    assert wait_for(lambda: audio._level == PB7_AUDIO_AMPLITUDE)
+
+    audio._stop.set()
+    reader.join(timeout=1.0)
+    assert not reader.is_alive()
+    conn.close()
+
+
+def test_pb7_audio_render_to_paints_ring_with_current_level():
+    audio = Pb7Audio(PortIO(pb7=PB7State(free_run=False)), "/nonexistent")
+    audio._level = PB7_AUDIO_AMPLITUDE
+    with audio._lock:
+        audio._render_to(10)
+    assert (audio._ring[:10] == PB7_AUDIO_AMPLITUDE).all()
+    assert audio._write_pos == 10
+
+
+def test_pb7_audio_render_to_is_a_noop_when_target_not_ahead():
+    audio = Pb7Audio(PortIO(pb7=PB7State(free_run=False)), "/nonexistent")
+    with audio._lock:
+        audio._render_to(10)
+        audio._level = PB7_AUDIO_AMPLITUDE
+        audio._render_to(5)  # behind the current write position -- must not repaint backwards
+    assert audio._write_pos == 10
+    assert (audio._ring[:10] == -PB7_AUDIO_AMPLITUDE).all()  # untouched by the no-op call
+
+
+def test_pb7_audio_render_to_catches_up_when_hopelessly_behind():
+    audio = Pb7Audio(PortIO(pb7=PB7State(free_run=False)), "/nonexistent")
+    huge_target = app.PB7_AUDIO_RING_CAPACITY * 3
+    with audio._lock:
+        audio._level = PB7_AUDIO_AMPLITUDE
+        audio._render_to(huge_target)
+    assert audio._write_pos == huge_target
+    assert (audio._ring == PB7_AUDIO_AMPLITUDE).all()
 
 
 def test_toggle_pb6_mode_cancels_an_in_flight_pulse(connected_peripheral):

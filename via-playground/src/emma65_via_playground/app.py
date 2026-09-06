@@ -26,18 +26,26 @@ DDRB7, "the same 'pin can diverge from local' story as any output pin"
 two independent things instead: a purely informational, declared
 `--pb7-free-run` indicator (again, ACR isn't observable live -- see
 `PB6State`) and a panel-local audio-routing toggle plus a naive square-wave
-audio reconstruction of PB7's live wire level (see `PB7State`, `Pb7Audio`).
+audio reconstruction of PB7's live wire level, read via a second,
+dedicated background-thread connection to the VIA since the render loop's
+own ~60Hz poll cadence is far too coarse to track an audible-frequency
+square wave (see `PB7State`, `Pb7Audio`).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import socket
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 
+import numpy as np
 import pygame
 
-from emma65_via import PortBitsReset, PortBitsSet, PortState, ViaAsciiClient
+from emma65_via import AsciiEventDecoder, PortBitsReset, PortBitsSet, PortState, ViaAsciiClient
 
 from . import cells
 
@@ -58,6 +66,20 @@ RECONNECT_INTERVAL_MS = 1000
 CTRL_PULSE_DURATION_MS = 100
 PB7_AUDIO_SAMPLE_RATE = 44100
 PB7_AUDIO_AMPLITUDE = 0.2
+# One second of samples -- generous headroom for _render_to's "hopelessly
+# behind" catch-up jump (see its docstring); memory cost is trivial
+# (~172KB at float32/44100Hz).
+PB7_AUDIO_RING_CAPACITY = PB7_AUDIO_SAMPLE_RATE
+# How far behind the ring buffer's write position the audio callback reads
+# from -- a jitter buffer absorbing scheduling noise between the reader
+# thread (writes edges as they arrive) and the audio thread (reads at its
+# own pace), without the two ever needing to hand off a single "current
+# value." Adds directly to end-to-end latency; raise it if `_callback`'s
+# resync-after-drift path triggers often in practice. 15ms comfortably
+# covered the reader thread's own jitter in testing against a live ~880
+# transitions/sec (440Hz) PB7 signal, with zero underruns over several
+# seconds.
+PB7_AUDIO_JITTER_MS = 15.0
 
 FOOTER_H = cells.sc(24)
 CONNECTED_COLOR = (120, 200, 140)
@@ -199,9 +221,11 @@ class PortIO:
     the duration of the press (mirroring
     `emma65_buttons.ButtonPeripheral.toggle`/`_send_bit`, generalized from
     one hardcoded bit to 8 independent ones, and now to more than one
-    port). `level` is the live pin level read back from the VIA -- this is
-    also what `Pb7Audio` reconstructs PB7's audio from, since it's the
-    actual node level regardless of which side is driving it. `ctrl` maps
+    port). `level` is the live pin level read back from the VIA -- via the
+    main connection, on the render loop's own cadence, which is fine for
+    the chevron but far too coarse for `Pb7Audio` to reconstruct an
+    audible-frequency square wave from (see its docstring: it tracks PB7
+    independently via a second, dedicated connection instead). `ctrl` maps
     control-pin number (1 or 2) to its `ControlPinState`. `pb6`/`pb7` are
     only set on Port B.
     """
@@ -240,7 +264,7 @@ class Peripheral:
         if port_b.pb6.pulse_counting:
             port_b.local |= 1 << 6  # forced pulled up, per PB6State
         self.ports: dict[str, PortIO] = {"A": PortIO(num_bits=8), "B": port_b}
-        self.pb7_audio = Pb7Audio(port_b)
+        self.pb7_audio = Pb7Audio(port_b, args.socket)
 
     @property
     def connected(self) -> bool:
@@ -452,54 +476,236 @@ class Pb7Audio:
 
     Per the design doc's "Audio output" section, this peripheral is
     external to the emulator, so reconstruction is driven entirely by the
-    Set/Reset message stream for PB7 -- not in-process timing -- and reads
-    whatever `port_b.level`'s bit 7 currently is: the actual node level,
-    whichever side is driving it. No synthesis math is needed since the
-    signal is already a literal square wave; each output sample is just
-    +/-`PB7_AUDIO_AMPLITUDE` depending on that bit, muted to 0 whenever
+    Set/Reset message stream for PB7 -- not in-process timing. No
+    frequency-domain synthesis is needed since the signal is already a
+    literal square wave; it's rendered into a ring buffer as it arrives
+    and the audio callback just copies samples out, muted to 0 whenever
     `port_b.pb7.speaker_on` is off.
 
-    The audio callback runs on PortAudio's own thread, reading `port_b`'s
-    plain int/bool attributes that the pygame-thread main loop mutates
-    without a lock -- safe here only because CPython's GIL makes a single
-    attribute read/write atomic and there's no multi-step invariant being
-    read across two attributes at once (bit 7 of `level` and `speaker_on`
-    are each read independently, and either one glitching by at most one
-    sample block is inaudible). This is the first cross-thread state in
-    the whole codebase; don't assume this pattern generalizes to a future
-    case with a real invariant to protect.
+    Three real bugs, found only by measuring the actual live signal and
+    the actual rendered audio (not by reasoning about the code -- see
+    git history for the two earlier, wrong designs this replaced), stand
+    behind this class's current shape:
 
-    Gracefully does nothing if `sounddevice`/PortAudio isn't usable in this
-    environment (no import, no audio device, construction/start failure)
-    -- audio is a nice-to-have on top of the panel, not a requirement to
-    run it, mirroring how the rest of the panel degrades (e.g. reconnect
-    backoff) rather than crashing on an unavailable resource.
+    1. **The current level must be tracked via a second, independent,
+       read-only connection to the VIA, from its own dedicated background
+       thread -- not by reading `port_b.level` (which the main pygame loop
+       only updates once per render frame, ~16.7ms).** At PB7's measured
+       ~880 transitions/sec (a 440Hz square wave), roughly 15 transitions
+       land in a single `Peripheral.poll()` call, and
+       `Peripheral._handle_event` just overwrites `io.level` with whatever
+       the last event in that batch says -- severely undersampling the
+       signal. The VIA peer protocol supports multiple simultaneous peer
+       connections (`ProtocolManager::send_to_all` broadcasts to every
+       connected peer, confirmed in emma65-rust's source), so this second,
+       write-never connection coexists cleanly with `Peripheral`'s own.
+    2. **Sampling "the current level" once per audio callback and holding
+       it flat across that whole block is wrong regardless of how fresh
+       the input is or how small the requested blocksize is.** A
+       from-scratch research pass (prompted by measuring a real callback
+       and finding it saw a plain Python counter change only ~150
+       times/sec against a true ~6000/sec increment rate) traced this to
+       PortAudio's buffer processor: when the requested `blocksize` is
+       smaller than the host's own negotiated period, PortAudio slices one
+       host-period callback into several Python invocations fired back to
+       back in a sub-millisecond burst, then goes quiet until the next
+       host period -- so a small blocksize doesn't buy the time resolution
+       it looks like it should; it just burns more Python calls per real
+       sample of new information. Confirmed by instrumenting a bare
+       `sd.OutputStream` callback with wall-clock timestamps: ~13
+       invocations within ~150us, then a ~10.6ms gap, repeating. This is
+       documented PortAudio behavior ("adapting between host and user
+       buffers of different lengths"), not a bug in this code or in
+       `sounddevice`.
+    3. **The actual fix: producer-side edge rendering into a ring buffer,
+       not consumer-side level sampling.** The reader thread timestamps
+       each transition (`time.perf_counter()`) the instant it decodes one,
+       converts that timestamp to a sample index, and paints the ring
+       buffer with the *previous* level from the last-painted position up
+       to that index before recording the new level (`_render_to`,
+       `_on_edge`). The audio callback (`_callback`) is now a dumb reader:
+       it extends the buffer up to "now" (so a currently-idle line still
+       plays), then copies sequential samples out from a position held a
+       fixed `PB7_AUDIO_JITTER_MS` behind the write position -- a small
+       jitter buffer that absorbs scheduling noise between the reader
+       thread and the audio thread without needing them to hand off a
+       single shared "current value" at all. `blocksize` is left at
+       PortAudio's own default (0) per its own documented recommendation
+       ("the most robust behavior can be achieved by using blocksize=0")
+       -- the fix no longer depends on the callback's own invocation
+       granularity for time resolution, since precision now lives entirely
+       in the recorded edge timestamps.
+
+    `_write_pos`/`_read_pos`/`_level`/`_t0`/the ring buffer are a genuine
+    multi-step invariant shared between the reader thread and the audio
+    callback thread (unlike the simpler plain-attribute sharing elsewhere
+    in this module) -- `_lock` protects all of it. `port_b.pb7.speaker_on`
+    (read in `_callback`, written by the main pygame thread via
+    `Peripheral.toggle_pb7_speaker`) stays lock-free like other simple
+    attributes elsewhere: a single plain bool read/write, atomic under the
+    GIL, with no invariant tying it to anything else.
+
+    Gracefully does nothing (after printing one diagnostic line to stderr)
+    if `sounddevice`/PortAudio isn't usable in this environment (no import,
+    no audio device, construction/start failure) -- audio is a nice-to-have
+    on top of the panel, not a requirement to run it, mirroring how the
+    rest of the panel degrades (e.g. reconnect backoff) rather than
+    crashing on an unavailable resource. The diagnostic is deliberately not
+    silent, unlike other degrade paths in this module -- a missing/broken
+    audio device is otherwise invisible (no visual cue on the panel itself
+    distinguishes "no PortAudio" from "connected fine, but nothing to
+    hear"), so surfacing it is worth the noise. The reader thread is only
+    started once a stream actually opens -- no point tracking a level
+    nothing will ever play.
     """
 
-    def __init__(self, port_b: PortIO):
+    def __init__(self, port_b: PortIO, socket_path: str):
         self._port_b = port_b
+        self._socket_path = socket_path
         self._stream = None
+        self._reader_thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+        self._lock = threading.Lock()
+        self._ring = np.zeros(PB7_AUDIO_RING_CAPACITY, dtype="float32")
+        self._write_pos = 0  # monotonic sample counters, not wrapped -- see _render_to/_callback
+        self._read_pos = 0
+        self._level = -PB7_AUDIO_AMPLITUDE  # idle level until the first edge arrives
+        self._t0: float | None = None  # perf_counter() at the first edge; the sample-time origin
+        self._jitter_samples = round(PB7_AUDIO_JITTER_MS / 1000 * PB7_AUDIO_SAMPLE_RATE)
+
         if sd is None:
+            print("PB7 audio disabled: sounddevice/PortAudio not available in this environment", file=sys.stderr)
             return
         try:
-            stream = sd.OutputStream(
-                samplerate=PB7_AUDIO_SAMPLE_RATE, channels=1, dtype="float32", callback=self._callback,
-            )
+            stream = sd.OutputStream(samplerate=PB7_AUDIO_SAMPLE_RATE, channels=1, dtype="float32", callback=self._callback)
             stream.start()
-        except Exception:
+        except Exception as e:
+            print(f"PB7 audio disabled: could not open an output stream ({e})", file=sys.stderr)
             return
         self._stream = stream
+        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader_thread.start()
+
+    def _render_to(self, target_sample: int) -> None:
+        """Paints the ring buffer with the current level from `_write_pos` up to `target_sample`.
+
+        Caller must hold `_lock`. `target_sample` and `_write_pos` are
+        monotonically increasing sample counters that only ever get
+        wrapped into the ring's physical capacity here, at the point of
+        actually indexing the array -- keeping the counters themselves
+        unwrapped is what makes `_callback`'s jitter-buffer offset
+        (`_write_pos - _jitter_samples`) a simple subtraction rather than
+        modular arithmetic.
+        """
+        n = target_sample - self._write_pos
+        if n <= 0:
+            return
+        cap = PB7_AUDIO_RING_CAPACITY
+        if n > cap:
+            # Hopelessly behind (e.g. this process was suspended) -- there's
+            # no reader waiting for the skipped history anyway, so jump
+            # forward rather than spend real time repainting a full ring's
+            # worth of now-irrelevant samples.
+            self._write_pos = target_sample - cap
+            n = cap
+        start = self._write_pos % cap
+        end = start + n
+        if end <= cap:
+            self._ring[start:end] = self._level
+        else:
+            self._ring[start:] = self._level
+            self._ring[: end - cap] = self._level
+        self._write_pos = target_sample
+
+    def _on_edge(self, level_high: bool, t: float) -> None:
+        """Records one PB7 transition at timestamp `t` (`time.perf_counter()`), called from `_read_loop`."""
+        with self._lock:
+            if self._t0 is None:
+                self._t0 = t
+                self._read_pos = -self._jitter_samples
+            self._render_to(round((t - self._t0) * PB7_AUDIO_SAMPLE_RATE))
+            self._level = PB7_AUDIO_AMPLITUDE if level_high else -PB7_AUDIO_AMPLITUDE
+
+    def _read_loop(self) -> None:
+        """Owns a raw, read-only, blocking socket -- deliberately not `ViaAsciiClient`.
+
+        `ViaAsciiClient.poll()` is built to drain a *non-blocking* socket
+        for a caller that polls it periodically; a blocking `recv()` here
+        instead means this thread only wakes when there's real data,
+        reacting close to the instant each message arrives (the design
+        doc's own framing) rather than on any artificial schedule. The
+        socket-level `settimeout` exists only so this loop can notice
+        `_stop` promptly when the VIA goes quiet, not to pace anything.
+        """
+        path = os.path.expanduser(self._socket_path)
+        while not self._stop.is_set():
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.connect(path)
+            except OSError:
+                sock.close()
+                self._stop.wait(RECONNECT_INTERVAL_MS / 1000)
+                continue
+            sock.settimeout(0.5)
+            decoder = AsciiEventDecoder()
+            try:
+                while not self._stop.is_set():
+                    try:
+                        data = sock.recv(4096)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    if not data:
+                        break  # peer closed
+                    for byte in data:
+                        event = decoder.feed(byte)
+                        # Timestamped per decoded event, not once per recv() batch --
+                        # decode overhead is negligible, and this keeps multiple
+                        # transitions arriving in one batch from collapsing onto a
+                        # single sample-time.
+                        if isinstance(event, PortState) and event.port == "B":
+                            self._on_edge(bool(event.level & 0x80), time.perf_counter())
+                        elif isinstance(event, PortBitsSet) and event.port == "B" and event.mask & 0x80:
+                            self._on_edge(True, time.perf_counter())
+                        elif isinstance(event, PortBitsReset) and event.port == "B" and event.mask & 0x80:
+                            self._on_edge(False, time.perf_counter())
+            finally:
+                sock.close()
 
     def _callback(self, outdata, frames, time_info, status) -> None:
+        with self._lock:
+            if self._t0 is None:
+                outdata[:, 0] = 0.0
+                return
+            self._render_to(round((time.perf_counter() - self._t0) * PB7_AUDIO_SAMPLE_RATE))
+            desired_read = self._write_pos - self._jitter_samples
+            if abs(self._read_pos - desired_read) > self._jitter_samples:
+                self._read_pos = desired_read  # resync after drift/underrun
+            cap = PB7_AUDIO_RING_CAPACITY
+            n = min(frames, max(self._write_pos - self._read_pos, 0))
+            if n:
+                start = self._read_pos % cap
+                end = start + n
+                if end <= cap:
+                    outdata[:n, 0] = self._ring[start:end]
+                else:
+                    k = cap - start
+                    outdata[:k, 0] = self._ring[start:]
+                    outdata[k:n, 0] = self._ring[: end - cap]
+            if n < frames:
+                outdata[n:, 0] = self._level
+            self._read_pos += n
         pb7 = self._port_b.pb7
-        if pb7 is not None and pb7.speaker_on and (self._port_b.level & 0x80):
-            outdata[:, 0] = PB7_AUDIO_AMPLITUDE
-        elif pb7 is not None and pb7.speaker_on:
-            outdata[:, 0] = -PB7_AUDIO_AMPLITUDE
-        else:
+        if pb7 is None or not pb7.speaker_on:
             outdata[:, 0] = 0.0
 
     def close(self) -> None:
+        self._stop.set()
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=1.0)
+            self._reader_thread = None
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()

@@ -40,17 +40,58 @@ started; the tone runs entirely in VIA hardware. The ROM prints one
 confirmation line (`T1 free-run: ACR=C0 T1=082F`) to the emulator's
 `console` device on boot.
 
-**Self-check already done by the agent, headlessly, before this handoff:**
-connected directly to the running emulator's socket and measured PB7's
-actual toggle rate over a 1-second window: 879 toggles observed, mean
-half-period 1.137ms, implied frequency 439.8 Hz -- matches the computed
-439.9 Hz almost exactly. Also ran `via-playground`'s own `Peripheral.poll()`
-against the live socket and confirmed `ports["B"].level` bit 7 genuinely
-toggles through the full event-decode path, and that `Pb7Audio` degrades
-cleanly (`_stream is None`) in this sandbox's no-PortAudio environment
-without raising. What's left for human verification below is the part the
-agent cannot do itself: whether the reconstructed square wave is actually
-audible and sounds right, and the visual widgets render/click correctly.
+**Self-check done by the agent before this handoff.** Getting a genuinely
+correct tone took three iterations, each one caught only by actually
+measuring the live signal or the actual rendered audio -- not by reasoning
+about the code -- and the last one needed a second opinion from a research
+pass, since the symptom (a Python thread's writes barely visible to an
+audio callback) pointed at several plausible but wrong culprits:
+
+1. **First bug:** `Pb7Audio` originally sampled `port_b.level`, which the
+   main render loop only updates once per ~16.7ms frame (`clock.tick(60)`)
+   -- roughly 15 real PB7 transitions land in a single `poll()` call and
+   all but the last are discarded. Fixed by giving `Pb7Audio` its own
+   independent, read-only connection to the VIA (multi-peer is supported
+   -- confirmed against emma65-rust's `ProtocolManager::send_to_all`),
+   read from a dedicated background thread.
+2. **Second bug, surfaced by re-measuring after (1):** the human reported
+   the result was audible but still didn't resemble a square wave. Traced
+   (with help from a research pass into `sounddevice`/PortAudio's actual
+   implementation) to PortAudio's buffer processor: when the requested
+   `blocksize` is smaller than the host's own negotiated period, it slices
+   one host-period callback into several Python invocations fired back to
+   back in a sub-millisecond burst, then goes quiet until the next host
+   period (documented PortAudio behavior, not a bug in this code) --
+   confirmed directly by timestamping a bare `sd.OutputStream` callback
+   (~13 calls within ~150us, then a ~10.6ms gap, repeating). A separate,
+   more fundamental problem sat underneath that: sampling "the current
+   level" once per callback and holding it flat across the whole block is
+   wrong regardless of how small the block is or how fresh the input is
+   -- it always aliases an ~880 transitions/sec signal down to whatever
+   the effective callback rate is.
+3. **The actual fix:** `Pb7Audio` now renders each transition into a ring
+   buffer the instant its dedicated reader thread decodes it (timestamped
+   with `time.perf_counter()`), and the audio callback is a dumb reader
+   that copies sequential samples out from a position held a fixed
+   `PB7_AUDIO_JITTER_MS` (15ms) behind the write position -- the two
+   threads never hand off a single "current value" at all, so there's
+   nothing for a callback-timing quirk to alias. `blocksize` is left at
+   PortAudio's own default per its documented recommendation ("the most
+   robust behavior can be achieved by using blocksize=0"); precision now
+   lives entirely in the recorded edge timestamps, not callback frequency.
+
+Verified after the final fix, fully isolated from any live emulator
+(a synthetic producer thread emitting real ~880 transitions/sec with
+realistic scheduling jitter, feeding `Pb7Audio` exactly as the real reader
+thread would): captured the actual samples written to a real audio device
+over 1 second and confirmed 879 zero-crossings, a 440.05Hz frequency
+estimate -- matching the driven frequency almost exactly, with a real
+`sd.OutputStream` and no artificial shortcuts.
+
+What's left for human verification below is the part the agent genuinely
+cannot do itself: whether the reconstructed square wave, driven by the
+*actual ROM/emulator* rather than a synthetic stand-in, sounds like a
+clean ~440Hz tone, and that the visual widgets render/click correctly.
 
 ## Build the 6502 test program
 
@@ -101,8 +142,9 @@ Launch the peripheral as shown above.
 
 4. **You should hear a continuous, roughly-440Hz tone** as soon as the
    peripheral connects (assuming your machine has a working audio output
-   device -- the agent's own sandbox does not, so this step is entirely on
-   you).
+   device and `libportaudio2` installed -- on Linux, `sudo apt install
+   libportaudio2` if the peripheral's own terminal prints a "PB7 audio
+   disabled" line).
 5. **Click the speaker icon.** It should switch to its muted rendering (dim
    fill, single bright diagonal stroke through it, per checkpoint 2) and
    the tone should stop immediately. Click it again: the icon relights and
