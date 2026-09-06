@@ -17,16 +17,11 @@ separated by `PORT_GAP`) so a combined multi-port canvas is measured and
 placed the same drift-proof way checkpoint 2 established for one row.
 
 `PB6Cell` (Unit 8) is a thin `DataCell` decorator for PB6's layered T2
-pulse-counting capability -- see its own docstring. `draw_declared_marker`
-is a shared visual convention (a dashed ring) for any widget showing a
-declared/fixed value rather than something derived live from the VIA,
-used by both `ControlCell`'s placeholder chevron and `PB6Cell`'s
-forced-pulled-up LED.
+pulse-counting capability -- see its own docstring.
 """
 
 from __future__ import annotations
 
-import math
 from typing import Literal
 
 import pygame
@@ -158,28 +153,6 @@ def draw_chevron(surf, cx, y0, size, direction: Direction, filled: bool):
         pygame.draw.polygon(surf, color, points, width=2)
 
 
-def draw_declared_marker(surf, cx, cy, r):
-    """Dashed ring marking a widget whose reading is a declared/fixed value
-    rather than something derived live from the VIA.
-
-    Shared convention for two ambiguities checkpoint 2 flagged separately:
-    the control-cell chevron's always-outlined placeholder direction (PCR
-    is never reported over the wire) and PB6's forced-pulled-up LED when
-    declared for T2 pulse counting (ACR is never reported either) -- see
-    `PB6Cell`. One mechanism instead of two bespoke fixes.
-    """
-    ring_r = r + sc(4)
-    dashes = 8
-    for i in range(dashes):
-        if i % 2:
-            continue
-        a0 = 2 * math.pi * i / dashes
-        a1 = 2 * math.pi * (i + 0.6) / dashes
-        p0 = (cx + ring_r * math.cos(a0), cy + ring_r * math.sin(a0))
-        p1 = (cx + ring_r * math.cos(a1), cy + ring_r * math.sin(a1))
-        pygame.draw.line(surf, TEXT_DIM, p0, p1, 1)
-
-
 def draw_seg_display(surf, font, cx, cy, text, color=SEG_ON):
     # Auto-sized to the text plus a tight pad, rather than a fixed box.
     pad_x, pad_y = sc(3), sc(2)
@@ -264,21 +237,12 @@ class Cell:
     def _chevron_filled(self) -> bool:
         raise NotImplementedError
 
-    def _chevron_declared(self) -> bool:
-        """Whether the chevron shows a declared/fixed placeholder rather
-        than a direction/level actually derived from live VIA data -- see
-        `draw_declared_marker`. Most cells' chevrons are live; override
-        where that isn't true."""
-        return False
-
     def _draw_body(self, surf, fonts: Fonts) -> None:
         raise NotImplementedError
 
     def draw(self, surf, fonts: Fonts) -> None:
         draw_text(surf, fonts.label, self.name, TEXT, center=(self.rect.centerx, label_center_y))
         draw_chevron(surf, self.rect.centerx, chevron_y0, chevron_size, self.direction, self._chevron_filled())
-        if self._chevron_declared():
-            draw_declared_marker(surf, self.rect.centerx, chevron_y0 + chevron_size / 2, chevron_size / 2)
         pygame.draw.rect(surf, PANEL, self.rect, border_radius=10)
         pygame.draw.rect(surf, PANEL_EDGE, self.rect, width=1, border_radius=10)
         self._draw_body(surf, fonts)
@@ -371,11 +335,9 @@ class PB6Cell(DataCell):
       toggle position and the segment-display real estate `ControlCell`
       uses one gap below it.
     - The LED still shows `driven` (local XOR momentary, same formula as
-      any `DataCell`), but carries the shared "declared, not toggle-set"
-      marker (`draw_declared_marker`) since `local` no longer reflects a
-      user's toggle position moment to moment -- the same ambiguity
-      checkpoint 2 flagged for the control-cell placeholder chevron,
-      resolved here with the same mechanism instead of a bespoke fix.
+      any `DataCell`), even though `local` no longer reflects a user's
+      toggle position moment to moment -- an ambiguity checkpoint 2 flagged
+      that's left unresolved for now (see the design doc).
 
     When `pulse_counting` is False, PB6 draws and behaves exactly like any
     other `DataCell`.
@@ -403,7 +365,6 @@ class PB6Cell(DataCell):
             return
         led_cy = self.rect.top + LED_OFF_DATA
         draw_led(surf, self.rect.centerx, led_cy, sc(13), on=self.driven)
-        draw_declared_marker(surf, self.rect.centerx, led_cy, sc(13))
         toggle_rect = self.toggle_rect()
         draw_toggle(surf, *toggle_rect.center, toggle_rect.width, toggle_rect.height, on=(self.mode == "pulse"))
         seg_text = "PLS" if self.mode == "pulse" else "LVL"
@@ -417,12 +378,9 @@ class ControlCell(Cell):
 
     The chevron is intentionally always outlined -- control-line direction
     is context-dependent on live PCR state, which isn't derived yet
-    (checkpoint 1's documented placeholder), and carries the shared
-    "declared, not live-derived" marker (`draw_declared_marker`, Unit 8) so
-    it doesn't read as a genuine low-pin-state reading. The LED stays
-    dark: per checkpoint 2 it should show the pin's level only when this
-    line is currently serving as a VIA-driven output, which isn't wired up
-    yet.
+    (checkpoint 1's documented placeholder). The LED stays dark: per
+    checkpoint 2 it should show the pin's level only when this line is
+    currently serving as a VIA-driven output, which isn't wired up yet.
     """
 
     kind = "ctrl"
@@ -449,9 +407,6 @@ class ControlCell(Cell):
 
     def _chevron_filled(self) -> bool:
         return False
-
-    def _chevron_declared(self) -> bool:
-        return True
 
     def mode_rect(self) -> pygame.Rect:
         """Clickable area for the pulse/level mode toggle, for hit-testing."""

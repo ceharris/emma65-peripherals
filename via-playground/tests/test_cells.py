@@ -237,21 +237,6 @@ def test_build_port_b_pb6_pulse_counting_can_be_declared_off():
     assert pb6.local is False
 
 
-def test_control_cell_chevron_carries_the_declared_marker():
-    assert make_ctrl_cell()._chevron_declared() is True
-
-
-def test_data_cell_chevron_does_not_carry_the_declared_marker():
-    assert make_data_cell()._chevron_declared() is False
-
-
-def test_pb6_cell_chevron_does_not_carry_the_declared_marker():
-    # The declared/fixed ambiguity for PB6 is about its LED, not its
-    # chevron -- direction/level there are still live, DDR-governed data.
-    pb6 = cells.build_port_b()[0]
-    assert pb6._chevron_declared() is False
-
-
 def test_layout_ports_places_each_port_via_layout_row_with_a_port_gap_between():
     port_a = cells.build_port_a()
     port_b = cells.build_port_b()
