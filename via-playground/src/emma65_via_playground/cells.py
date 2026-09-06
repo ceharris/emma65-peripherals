@@ -172,12 +172,26 @@ def draw_pulse_icon(surf, cx, cy, w, h, polarity: Polarity):
     pygame.draw.line(surf, TEXT_DIM, (x2, idle_y), (x3, idle_y), 1)
 
 
+UI_FONT = "Arial,Helvetica,DejaVu Sans,sans-serif"
+
+
 class Fonts:
-    """Fonts used by cell rendering. Created after `pygame.font.init()`."""
+    """Fonts used by cell rendering. Created after `pygame.font.init()`.
+
+    `label` and `seg` stay monospace -- pin labels (PA7, ...) want the
+    fixed-width alignment across the row, and the segment display is
+    intentionally styled as a digital/VFD readout (checkpoint 2). Status
+    bar and connection-status chrome use a regular UI font instead: their
+    monospace rendering was just inherited from the mockup reusing one
+    font everywhere, not a deliberate design choice, and reads as
+    unpolished for plain prose text like "OVERLOAD" or "MODE: FREE".
+    """
 
     def __init__(self):
         self.label = pygame.font.SysFont("Consolas,Menlo,monospace", sc(16), bold=True)
         self.seg = pygame.font.SysFont("Consolas,Menlo,monospace", sc(13), bold=True)
+        self.ui_title = pygame.font.SysFont(UI_FONT, sc(16), bold=True)
+        self.ui_small = pygame.font.SysFont(UI_FONT, sc(12))
 
 
 class Cell:
@@ -326,11 +340,10 @@ def draw_status_bar(surf, fonts, title: str, width: int) -> None:
     OVERLOAD and MODE are static placeholders here -- they get wired up in
     Units 10-11 (contention detection, Free/Guarded mode).
     """
-    small = pygame.font.SysFont("Consolas,Menlo,monospace", sc(12))
     pygame.draw.rect(surf, PANEL, (0, 0, width, status_h))
     pygame.draw.line(surf, PANEL_EDGE, (0, status_h), (width, status_h), 1)
     draw_led(surf, sc(24), sc(20), sc(8), on=False)
-    draw_text(surf, small, "OVERLOAD", TEXT_DIM, topleft=(sc(40), sc(13)))
-    draw_text(surf, small, "MODE: FREE", ACCENT, topleft=(width - sc(160), sc(13)))
-    draw_text(surf, fonts.label, title, TEXT, center=(width // 2, sc(20)))
-    draw_text(surf, small, "emma65", TEXT_DIM, topleft=(width - sc(46), sc(13)))
+    draw_text(surf, fonts.ui_small, "OVERLOAD", TEXT_DIM, topleft=(sc(40), sc(13)))
+    draw_text(surf, fonts.ui_small, "MODE: FREE", ACCENT, topleft=(width - sc(160), sc(13)))
+    draw_text(surf, fonts.ui_title, title, TEXT, center=(width // 2, sc(20)))
+    draw_text(surf, fonts.ui_small, "emma65", TEXT_DIM, topleft=(width - sc(46), sc(13)))

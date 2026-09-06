@@ -78,7 +78,6 @@ def run(args: argparse.Namespace) -> None:
 
     clock = pygame.time.Clock()
     fonts = cells.Fonts()
-    status_font = pygame.font.SysFont("Consolas,Menlo,monospace", cells.sc(12))
 
     peripheral = Peripheral(args)
 
@@ -101,7 +100,7 @@ def run(args: argparse.Namespace) -> None:
         status = "connected" if peripheral.connected else "connecting..."
         color = CONNECTED_COLOR if peripheral.connected else DISCONNECTED_COLOR
         cells.draw_text(
-            screen, status_font, f"{status}  ({args.socket})", color,
+            screen, fonts.ui_small, f"{status}  ({args.socket})", color,
             topleft=(cells.LEFT_MARGIN, cells.CONTENT_HEIGHT + cells.sc(4)),
         )
 
