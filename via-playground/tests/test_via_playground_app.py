@@ -1,4 +1,4 @@
-"""Tests for Peripheral's connect/reconnect plumbing and live Port A pin tracking."""
+"""Tests for Peripheral's connect/reconnect plumbing and live port pin tracking."""
 
 from __future__ import annotations
 
@@ -58,41 +58,54 @@ def test_parse_args_rejects_non_hex_pa_direction():
         parse_args(["--pa-direction", "zz"])
 
 
-def test_port_a_level_starts_at_zero(connected_peripheral):
+def test_parse_args_defaults_pb_direction():
+    args = parse_args([])
+    assert args.pb_direction == 0x38
+
+
+def test_parse_args_accepts_hex_pb_direction():
+    args = parse_args(["--pb-direction", "3f"])
+    assert args.pb_direction == 0x3F
+
+
+def test_port_levels_start_at_zero(connected_peripheral):
     peripheral, _ = connected_peripheral
-    assert peripheral.port_a_level == 0
+    assert peripheral.ports["A"].level == 0
+    assert peripheral.ports["B"].level == 0
 
 
-def test_port_state_event_sets_port_a_level(connected_peripheral):
+def test_port_state_event_sets_that_ports_level(connected_peripheral):
     peripheral, conn = connected_peripheral
     conn.sendall(b"A55")
     peripheral.poll()
-    assert peripheral.port_a_level == 0x55
+    assert peripheral.ports["A"].level == 0x55
+    assert peripheral.ports["B"].level == 0
 
 
 def test_port_b_state_event_does_not_affect_port_a_level(connected_peripheral):
     peripheral, conn = connected_peripheral
     conn.sendall(b"BFF")
     peripheral.poll()
-    assert peripheral.port_a_level == 0
+    assert peripheral.ports["A"].level == 0
+    assert peripheral.ports["B"].level == 0xFF
 
 
-def test_set_port_bits_ors_into_port_a_level(connected_peripheral):
+def test_set_port_bits_ors_into_that_ports_level(connected_peripheral):
     peripheral, conn = connected_peripheral
     conn.sendall(b"A0F")
     peripheral.poll()
     conn.sendall(b"SA30")
     peripheral.poll()
-    assert peripheral.port_a_level == 0x3F
+    assert peripheral.ports["A"].level == 0x3F
 
 
-def test_reset_port_bits_clears_from_port_a_level(connected_peripheral):
+def test_reset_port_bits_clears_from_that_ports_level(connected_peripheral):
     peripheral, conn = connected_peripheral
     conn.sendall(b"AFF")
     peripheral.poll()
     conn.sendall(b"RA0F")
     peripheral.poll()
-    assert peripheral.port_a_level == 0xF0
+    assert peripheral.ports["A"].level == 0xF0
 
 
 def test_not_connected_before_socket_exists(tmp_path):
@@ -143,29 +156,38 @@ def test_reconnect_respects_backoff_interval(tmp_path):
     assert not peripheral.connected
 
 
-def test_toggle_pa_flips_local_state_and_sends_bit(connected_peripheral):
+def test_toggle_data_flips_local_state_and_sends_bit(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.toggle_pa(3)
-    assert peripheral.pa_local == 0x08
+    peripheral.toggle_data("A", 3)
+    assert peripheral.ports["A"].local == 0x08
     assert conn.recv(1024) == b"SA08"
 
-    peripheral.toggle_pa(3)
-    assert peripheral.pa_local == 0x00
+    peripheral.toggle_data("A", 3)
+    assert peripheral.ports["A"].local == 0x00
     assert conn.recv(1024) == b"RA08"
 
     peripheral.close()
     conn.close()
 
 
-def test_toggle_pa_only_touches_its_own_bit(connected_peripheral):
+def test_toggle_data_only_touches_its_own_bit(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.toggle_pa(0)
+    peripheral.toggle_data("A", 0)
     conn.recv(1024)
-    peripheral.toggle_pa(5)
+    peripheral.toggle_data("A", 5)
     assert conn.recv(1024) == b"SA20"
-    assert peripheral.pa_local == 0x21
+    assert peripheral.ports["A"].local == 0x21
+
+
+def test_toggle_data_on_port_b_uses_port_b_wire_messages(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_data("B", 2)
+    assert peripheral.ports["B"].local == 0x04
+    assert conn.recv(1024) == b"SB04"
+    assert peripheral.ports["A"].local == 0  # Port A untouched
 
     peripheral.close()
     conn.close()
@@ -175,11 +197,11 @@ def test_momentary_press_asserts_opposite_of_toggle_level(connected_peripheral):
     peripheral, conn = connected_peripheral
 
     # Toggle off (local low): momentary press should drive high.
-    peripheral.set_pa_momentary(2, True)
+    peripheral.set_momentary("A", 2, True)
     assert conn.recv(1024) == b"SA04"
 
     # Release: back to the toggle's (low) level.
-    peripheral.set_pa_momentary(2, False)
+    peripheral.set_momentary("A", 2, False)
     assert conn.recv(1024) == b"RA04"
 
     peripheral.close()
@@ -189,13 +211,13 @@ def test_momentary_press_asserts_opposite_of_toggle_level(connected_peripheral):
 def test_momentary_press_with_toggle_on_asserts_low(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.toggle_pa(4)
+    peripheral.toggle_data("A", 4)
     assert conn.recv(1024) == b"SA10"
 
-    peripheral.set_pa_momentary(4, True)
+    peripheral.set_momentary("A", 4, True)
     assert conn.recv(1024) == b"RA10"
 
-    peripheral.set_pa_momentary(4, False)
+    peripheral.set_momentary("A", 4, False)
     assert conn.recv(1024) == b"SA10"
 
     peripheral.close()
@@ -206,7 +228,7 @@ def test_momentary_is_a_noop_when_state_unchanged(connected_peripheral):
     peripheral, conn = connected_peripheral
     conn.setblocking(False)
 
-    peripheral.set_pa_momentary(1, False)  # already released: must send nothing
+    peripheral.set_momentary("A", 1, False)  # already released: must send nothing
     with pytest.raises(BlockingIOError):
         conn.recv(1024)
 
@@ -214,7 +236,7 @@ def test_momentary_is_a_noop_when_state_unchanged(connected_peripheral):
     conn.close()
 
 
-def test_reconnect_reasserts_local_and_momentary_state_for_all_bits(via_server):
+def test_reconnect_reasserts_local_and_momentary_state_for_all_owned_bits(via_server):
     sock_path, server = via_server
     peripheral = Peripheral(parse_args(["--socket", sock_path]))
 
@@ -222,10 +244,11 @@ def test_reconnect_reasserts_local_and_momentary_state_for_all_bits(via_server):
     conn, _ = server.accept()
     conn.recv(1024)  # discard the initial connect-time reassertion (all bits low)
 
-    peripheral.toggle_pa(1)
-    peripheral.toggle_pa(6)
-    peripheral.set_pa_momentary(6, True)  # overrides bit 6 back to low
-    conn.recv(1024)  # discard those three interaction messages
+    peripheral.toggle_data("A", 1)
+    peripheral.toggle_data("A", 6)
+    peripheral.set_momentary("A", 6, True)  # overrides bit 6 back to low
+    peripheral.toggle_data("B", 2)
+    conn.recv(1024)  # discard those interaction messages
 
     conn.close()
     peripheral.poll()
@@ -234,13 +257,20 @@ def test_reconnect_reasserts_local_and_momentary_state_for_all_bits(via_server):
     peripheral.connect_if_needed(0)
     conn2, _ = server.accept()
 
-    # Bit 1's toggle is on (driven high); bit 6's toggle is also on, but its
-    # momentary press overrides it back to driven-low; every other bit is
-    # driven low by its (untouched) toggle position. CA1/CA2 are untouched,
-    # so they reassert to their default (rising) polarity's idle-low level.
-    expected = b"".join(
-        b"SA02" if bit == 1 else b"RA%02X" % (1 << bit) for bit in range(8)
-    ) + b"RCA1RCA2"
+    # Reassertion happens per port (all of a port's bits, then its two
+    # control pins, before moving to the next port). Port A: bit 1's toggle
+    # is on (driven high); bit 6's toggle is also on, but its momentary
+    # press overrides it back to driven-low; every other bit is driven low
+    # by its (untouched) toggle position; CA1/CA2 are untouched, so they
+    # reassert to their default (rising) polarity's idle-low level. Port B:
+    # bit 2 is on, every other owned bit (0-5) is driven low; CB1/CB2 are
+    # likewise untouched.
+    expected = (
+        b"".join(b"SA02" if bit == 1 else b"RA%02X" % (1 << bit) for bit in range(8))
+        + b"RCA1RCA2"
+        + b"".join(b"SB04" if bit == 2 else b"RB%02X" % (1 << bit) for bit in range(6))
+        + b"RCB1RCB2"
+    )
     data = b""
     while len(data) < len(expected):
         data += conn2.recv(1024)
@@ -273,11 +303,24 @@ def test_control_pin_state_driven_level_while_pulsing_regardless_of_held():
 def test_press_ctrl_in_level_mode_drives_active_level_while_held(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.press_ctrl(1, 0)  # CA1 default: level mode, rising polarity (idle low)
+    peripheral.press_ctrl("A", 1, 0)  # CA1 default: level mode, rising polarity (idle low)
     assert conn.recv(1024) == b"SCA1"
 
-    peripheral.release_ctrl(1)
+    peripheral.release_ctrl("A", 1)
     assert conn.recv(1024) == b"RCA1"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_press_ctrl_on_port_b_uses_port_b_wire_messages(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.press_ctrl("B", 1, 0)
+    assert conn.recv(1024) == b"SCB1"
+
+    peripheral.release_ctrl("B", 1)
+    assert conn.recv(1024) == b"RCB1"
 
     peripheral.close()
     conn.close()
@@ -286,10 +329,10 @@ def test_press_ctrl_in_level_mode_drives_active_level_while_held(connected_perip
 def test_press_ctrl_in_level_mode_respects_falling_polarity(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.toggle_ctrl_polarity(2)  # CA2 default is rising (idle low); flip to falling
+    peripheral.toggle_ctrl_polarity("A", 2)  # CA2 default is rising (idle low); flip to falling
     assert conn.recv(1024) == b"SCA2"  # idle level flips high, so it re-asserts immediately
 
-    peripheral.press_ctrl(2, 0)
+    peripheral.press_ctrl("A", 2, 0)
     assert conn.recv(1024) == b"RCA2"  # falling polarity's active level is low
 
     peripheral.close()
@@ -299,12 +342,12 @@ def test_press_ctrl_in_level_mode_respects_falling_polarity(connected_peripheral
 def test_press_ctrl_in_pulse_mode_fires_one_transition_ignoring_hold_time(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.toggle_ctrl_mode(1)  # CA1 -> pulse mode
-    peripheral.press_ctrl(1, 1000)
+    peripheral.toggle_ctrl_mode("A", 1)  # CA1 -> pulse mode
+    peripheral.press_ctrl("A", 1, 1000)
     assert conn.recv(1024) == b"SCA1"
 
     # Releasing before the pulse duration elapses must not change the wire.
-    peripheral.release_ctrl(1)
+    peripheral.release_ctrl("A", 1)
     conn.setblocking(False)
     with pytest.raises(BlockingIOError):
         conn.recv(1024)
@@ -327,11 +370,11 @@ def test_press_ctrl_in_pulse_mode_fires_one_transition_ignoring_hold_time(connec
 def test_pressing_again_mid_pulse_restarts_the_timer(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.toggle_ctrl_mode(1)
-    peripheral.press_ctrl(1, 1000)
+    peripheral.toggle_ctrl_mode("A", 1)
+    peripheral.press_ctrl("A", 1, 1000)
     conn.recv(1024)
 
-    peripheral.press_ctrl(1, 1050)  # re-press before the first pulse would have ended
+    peripheral.press_ctrl("A", 1, 1050)  # re-press before the first pulse would have ended
     conn.recv(1024)  # re-asserts the active level again
 
     # The original deadline (1000 + duration) has passed, but the restarted
@@ -349,14 +392,32 @@ def test_pressing_again_mid_pulse_restarts_the_timer(connected_peripheral):
     conn.close()
 
 
+def test_update_ctrl_pulses_reverts_independently_per_port(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_ctrl_mode("A", 1)
+    peripheral.toggle_ctrl_mode("B", 1)
+    peripheral.press_ctrl("A", 1, 1000)
+    peripheral.press_ctrl("B", 1, 1000)
+    conn.recv(1024)  # discard both presses (SCA1, SCB1, order not asserted)
+
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS)
+    data = conn.recv(1024)
+    assert b"RCA1" in data
+    assert b"RCB1" in data
+
+    peripheral.close()
+    conn.close()
+
+
 def test_toggle_ctrl_mode_cancels_an_in_flight_pulse(connected_peripheral):
     peripheral, conn = connected_peripheral
 
-    peripheral.toggle_ctrl_mode(1)  # -> pulse
-    peripheral.press_ctrl(1, 1000)
+    peripheral.toggle_ctrl_mode("A", 1)  # -> pulse
+    peripheral.press_ctrl("A", 1, 1000)
     conn.recv(1024)
 
-    peripheral.toggle_ctrl_mode(1)  # -> level, mid-pulse
+    peripheral.toggle_ctrl_mode("A", 1)  # -> level, mid-pulse
     assert conn.recv(1024) == b"RCA1"  # reverted to idle immediately
 
     # The cancelled pulse's deadline must no longer fire a spurious revert.
@@ -378,8 +439,8 @@ def test_reconnect_reasserts_control_pin_state(via_server):
     conn, _ = server.accept()
     conn.recv(1024)  # discard the initial connect-time reassertion
 
-    peripheral.toggle_ctrl_mode(1)  # CA1 -> pulse
-    peripheral.press_ctrl(1, 0)  # begin a pulse, currently driving active-high
+    peripheral.toggle_ctrl_mode("A", 1)  # CA1 -> pulse
+    peripheral.press_ctrl("A", 1, 0)  # begin a pulse, currently driving active-high
     conn.recv(1024)
 
     conn.close()
@@ -389,10 +450,16 @@ def test_reconnect_reasserts_control_pin_state(via_server):
     peripheral.connect_if_needed(0)
     conn2, _ = server.accept()
 
-    # CA1's pulse is still "in flight" per its own state (reconnecting
-    # doesn't cancel it) so it reasserts the active level; CA2 is untouched
-    # and reasserts its idle (rising-polarity, idle-low) level.
-    expected = b"".join(b"RA%02X" % (1 << bit) for bit in range(8)) + b"SCA1RCA2"
+    # Reassertion happens per port. CA1's pulse is still "in flight" per its
+    # own state (reconnecting doesn't cancel it) so it reasserts the active
+    # level; every other control pin (CA2, CB1, CB2) is untouched and
+    # reasserts its idle (rising-polarity, idle-low) level.
+    expected = (
+        b"".join(b"RA%02X" % (1 << bit) for bit in range(8))
+        + b"SCA1RCA2"
+        + b"".join(b"RB%02X" % (1 << bit) for bit in range(6))
+        + b"RCB1RCB2"
+    )
     data = b""
     while len(data) < len(expected):
         data += conn2.recv(1024)

@@ -82,6 +82,20 @@ def test_data_cell_chevron_filled_reflects_pin_not_local():
     assert cell._chevron_filled() is False
 
 
+def test_data_cell_driven_reflects_local_when_momentary_not_held():
+    assert cells.DataCell("PA0", direction="out", local=True, pin=True).driven is True
+    assert cells.DataCell("PA0", direction="out", local=False, pin=False).driven is False
+
+
+def test_data_cell_driven_is_inverted_while_momentary_held():
+    # Pulled up + momentary pressed: LED must go from lit to unlit.
+    cell = cells.DataCell("PA0", direction="out", local=True, pin=True, momentary_pressed=True)
+    assert cell.driven is False
+    # Pulled down + momentary pressed: LED must go from unlit to lit.
+    cell = cells.DataCell("PA0", direction="out", local=False, pin=False, momentary_pressed=True)
+    assert cell.driven is True
+
+
 def test_control_cell_chevron_is_always_placeholder_outline():
     # Direction is context-dependent on live PCR state, not derived yet --
     # the chevron is a deliberate always-outlined placeholder (checkpoint 1).
@@ -158,3 +172,68 @@ def test_build_port_a_control_cells_carry_their_ctrl_pin_number():
     ctrl_cells = {cell.name: cell for cell in row if cell.kind == "ctrl"}
     assert ctrl_cells["CA1"].ctrl_pin == 1
     assert ctrl_cells["CA2"].ctrl_pin == 2
+
+
+def test_build_port_a_cells_carry_port_letter():
+    row = cells.build_port_a()
+    assert all(cell.port == "A" for cell in row)
+
+
+def test_build_port_b_pin_order_and_kinds():
+    row = cells.build_port_b()
+    names = [cell.name for cell in row]
+    assert names == ["PB5", "PB4", "PB3", "PB2", "PB1", "PB0", "CB1", "CB2"]
+    kinds = [cell.kind for cell in row]
+    assert kinds == ["data"] * 6 + ["ctrl"] * 2
+    assert all(cell.port == "B" for cell in row)
+
+
+def test_build_port_b_direction_follows_declared_mask():
+    row = cells.build_port_b(direction_mask=0b000101)  # PB0, PB2 out; rest in
+    data_cells = {cell.name: cell for cell in row if cell.kind == "data"}
+    assert data_cells["PB0"].direction == "out"
+    assert data_cells["PB2"].direction == "out"
+    assert data_cells["PB1"].direction == "in"
+    assert data_cells["PB5"].direction == "in"
+
+
+def test_build_port_b_control_cells_carry_their_ctrl_pin_number():
+    row = cells.build_port_b()
+    ctrl_cells = {cell.name: cell for cell in row if cell.kind == "ctrl"}
+    assert ctrl_cells["CB1"].ctrl_pin == 1
+    assert ctrl_cells["CB2"].ctrl_pin == 2
+
+
+def test_build_port_is_the_shared_constructor_behind_build_port_a_and_b():
+    a_names = [cell.name for cell in cells.build_port_a(0xF0)]
+    generic_a_names = [cell.name for cell in cells.build_port("A", 8, 0xF0)]
+    assert a_names == generic_a_names
+
+    b_names = [cell.name for cell in cells.build_port_b(0x38)]
+    generic_b_names = [cell.name for cell in cells.build_port("B", 6, 0x38)]
+    assert b_names == generic_b_names
+
+
+def test_layout_ports_places_each_port_via_layout_row_with_a_port_gap_between():
+    port_a = cells.build_port_a()
+    port_b = cells.build_port_b()
+    cells.layout_ports([port_a, port_b], 0)
+
+    assert port_a[0].rect.left == 0
+    last_a, first_b = port_a[-1], port_b[0]
+    assert first_b.rect.left == last_a.rect.right + cells.gap + cells.PORT_GAP
+
+
+def test_layout_ports_returns_right_edge_of_last_port():
+    port_a = cells.build_port_a()
+    port_b = cells.build_port_b()
+    right_edge = cells.layout_ports([port_a, port_b], 0)
+    assert right_edge == port_b[-1].rect.right
+
+
+def test_layout_ports_measuring_and_placing_agree_on_content_width():
+    measured_right = cells.layout_ports([cells.build_port_a(), cells.build_port_b()], 0)
+    placed_ports = [cells.build_port_a(), cells.build_port_b()]
+    placed_right = cells.layout_ports(placed_ports, cells.LEFT_MARGIN)
+    assert placed_right == measured_right + cells.LEFT_MARGIN
+    assert placed_ports[0][0].rect.left == cells.LEFT_MARGIN

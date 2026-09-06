@@ -10,7 +10,11 @@ geometry; live VIA data and interactivity are owned by `Peripheral` in
 Row layout (`layout_row`) is a function of a list of `Cell`s and a starting
 x-position, not hardcoded to one port, so Port B (Unit 7) becomes a second
 call into this same code instead of a duplicated block that can drift out
-of sync (the risk checkpoint 2 flagged explicitly).
+of sync (the risk checkpoint 2 flagged explicitly). `build_port` is the
+single pin-list constructor behind both `build_port_a`/`build_port_b`, and
+`layout_ports` composes multiple `layout_row` calls (one per port,
+separated by `PORT_GAP`) so a combined multi-port canvas is measured and
+placed the same drift-proof way checkpoint 2 established for one row.
 """
 
 from __future__ import annotations
@@ -71,6 +75,8 @@ ctrl_w = sc(40)  # equalized to data_w per checkpoint 2 (spacing is now the
 data_w = sc(40)  # only cue distinguishing control cells from data cells)
 gap = sc(6)
 ctrl_group_gap = sc(14)  # extra space before the first control cell
+PORT_GAP = sc(28)  # extra space between two ports' cell groups -- wider than
+                    # ctrl_group_gap so multiple ports read as separate panels
 LEFT_MARGIN = sc(20)  # mirrored on the right for symmetric canvas margins
 
 status_h = sc(40)
@@ -210,9 +216,10 @@ class Cell:
 
     kind: str
 
-    def __init__(self, name: str, direction: Direction):
+    def __init__(self, name: str, direction: Direction, port: str = ""):
         self.name = name
         self.direction = direction
+        self.port = port
         self.rect = pygame.Rect(0, 0, 0, 0)
 
     @property
@@ -239,12 +246,17 @@ class Cell:
 
 
 class DataCell(Cell):
-    """A data pin (PAx/PBx): LED (local pull), toggle, momentary button.
+    """A data pin (PAx/PBx): LED (driven output), toggle (local pull), momentary button.
 
-    LED and toggle both reflect `local` -- the level the panel's own
-    toggle pulls the pin toward. `pin` is the actual node level the VIA
-    sees, shown by the chevron; it can diverge from `local` on an output
-    pin (pull-up/down losing to an active VIA driver, or contention).
+    The toggle reflects `local` -- the level the panel's own toggle pulls
+    the pin toward. The LED reflects `driven` -- what the panel is actually
+    asserting onto the pin right now, which is `local` unless a held
+    momentary button is overriding it to the opposite level (so pressing
+    momentary on a pulled-up pin dims the LED, and on a pulled-down pin
+    lights it -- the LED must visibly move the instant the momentary is
+    pressed, not just show toggle position). `pin` is the actual node level
+    the VIA sees, shown by the chevron; it can diverge from `driven` on an
+    output pin (pull-up/down losing to an active VIA driver, or contention).
     """
 
     kind = "data"
@@ -257,8 +269,9 @@ class DataCell(Cell):
         pin: bool,
         momentary_pressed: bool = False,
         bit: int | None = None,
+        port: str = "",
     ):
-        super().__init__(name, direction)
+        super().__init__(name, direction, port=port)
         self.local = local
         self.pin = pin
         self.momentary_pressed = momentary_pressed
@@ -267,6 +280,13 @@ class DataCell(Cell):
     @property
     def width(self) -> int:
         return data_w
+
+    @property
+    def driven(self) -> bool:
+        """The level this cell is actually asserting onto the pin right now:
+        `local`, unless a held momentary button is overriding it to the
+        opposite level for its duration."""
+        return self.local != self.momentary_pressed
 
     def _chevron_filled(self) -> bool:
         return self.pin
@@ -285,7 +305,7 @@ class DataCell(Cell):
         return rect
 
     def _draw_body(self, surf, fonts: Fonts) -> None:
-        draw_led(surf, self.rect.centerx, self.rect.top + LED_OFF_DATA, sc(13), on=self.local)
+        draw_led(surf, self.rect.centerx, self.rect.top + LED_OFF_DATA, sc(13), on=self.driven)
         toggle_rect = self.toggle_rect()
         draw_toggle(surf, *toggle_rect.center, toggle_rect.width, toggle_rect.height, on=self.local)
         momentary_rect = self.momentary_rect()
@@ -312,8 +332,9 @@ class ControlCell(Cell):
         polarity: Polarity,
         momentary_pressed: bool = False,
         ctrl_pin: int | None = None,
+        port: str = "",
     ):
-        super().__init__(name, direction)
+        super().__init__(name, direction, port=port)
         self.mode = mode
         self.polarity = polarity
         self.momentary_pressed = momentary_pressed
@@ -375,31 +396,78 @@ def layout_row(cells: list[Cell], start_x: int) -> int:
     return x - gap
 
 
-def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
-    """Port A row: PA7..PA0 (direction per `direction_mask`), CA1, CA2.
+def layout_ports(ports: list[list[Cell]], start_x: int) -> int:
+    """Lays out multiple ports left-to-right via `layout_row`, separated by `PORT_GAP`.
 
-    `direction_mask` bit *n* set means PA*n* is declared an output. This is
+    Single source of truth for a combined multi-port canvas's positions,
+    used both to measure total content width (equal margins on a combined
+    canvas) and to actually place cells -- mirroring `layout_row`'s own
+    measure/place contract for one port, so the two still can't drift apart
+    now that there's more than one row sharing a canvas (Unit 7).
+    """
+    x = start_x
+    right = x
+    for i, port in enumerate(ports):
+        if i > 0:
+            x += PORT_GAP
+        right = layout_row(port, x)
+        x = right + gap
+    return right
+
+
+def build_port(letter: str, num_bits: int, direction_mask: int = 0x00) -> list[Cell]:
+    """Generic port row: P<letter><num_bits-1>..P<letter>0, C<letter>1, C<letter>2.
+
+    `direction_mask` bit *n* set means pin *n* is declared an output. This is
     a declared property of how the panel is wired for a given ROM/firmware,
     not something read from the VIA -- the peer protocol never conveys DDR
     (see `emma65_via.protocol`'s module docstring), and on real hardware an
     external peripheral has no way to query it either. A mismatch between
-    this declaration and the firmware's actual DDRA shows up as chevron/LED
+    this declaration and the firmware's actual DDR shows up as chevron/LED
     divergence (and, from Unit 10, the Overload indicator) rather than an
     error -- the panel doesn't enforce correct configuration, mirroring real
     hardware.
+
+    C<letter>1 is always declared "in" and C<letter>2 "out" -- CA1/CB1 are
+    always inputs on real 6522 hardware, unlike CA2/CB2 which are
+    configurable; "out" is just this panel's demo default for the
+    configurable one, not a hardware constraint the way CA1/CB1's "in" is.
 
     `local` and `pin` both start low; the caller keeps `pin` live from VIA
     port-state events and `local`/`momentary_pressed` live from the panel's
     own toggle/momentary interactivity (see `Peripheral` in `app.py`).
     """
     data_cells = [
-        DataCell(f"PA{n}", direction=("out" if (direction_mask >> n) & 1 else "in"), local=False, pin=False, bit=n)
-        for n in range(7, -1, -1)
+        DataCell(
+            f"P{letter}{n}",
+            direction=("out" if (direction_mask >> n) & 1 else "in"),
+            local=False, pin=False, bit=n, port=letter,
+        )
+        for n in range(num_bits - 1, -1, -1)
     ]
     return data_cells + [
-        ControlCell("CA1", direction="in", mode="level", polarity="rising", ctrl_pin=1),
-        ControlCell("CA2", direction="out", mode="level", polarity="rising", ctrl_pin=2),
+        ControlCell(f"C{letter}1", direction="in", mode="level", polarity="rising", ctrl_pin=1, port=letter),
+        ControlCell(f"C{letter}2", direction="out", mode="level", polarity="rising", ctrl_pin=2, port=letter),
     ]
+
+
+def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
+    """Port A row: PA7..PA0 (direction per `direction_mask`), CA1, CA2.
+
+    See `build_port` for the shared semantics of `direction_mask`.
+    """
+    return build_port("A", 8, direction_mask)
+
+
+def build_port_b(direction_mask: int = 0x38) -> list[Cell]:
+    """Port B row: PB5..PB0 (direction per `direction_mask`), CB1, CB2.
+
+    Only PB0-PB5 are in scope for Unit 7 -- PB6/PB7's special-case behavior
+    (pulse-counting mode, T1 free-run/audio) is Units 8-9, so this panel
+    doesn't yet own or render those two bits. See `build_port` for the
+    shared semantics of `direction_mask`.
+    """
+    return build_port("B", 6, direction_mask)
 
 
 def draw_status_bar(surf, fonts, title: str, width: int) -> None:
