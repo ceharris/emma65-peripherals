@@ -80,18 +80,37 @@ audio callback) pointed at several plausible but wrong culprits:
    robust behavior can be achieved by using blocksize=0"); precision now
    lives entirely in the recorded edge timestamps, not callback frequency.
 
-Verified after the final fix, fully isolated from any live emulator
-(a synthetic producer thread emitting real ~880 transitions/sec with
-realistic scheduling jitter, feeding `Pb7Audio` exactly as the real reader
-thread would): captured the actual samples written to a real audio device
-over 1 second and confirmed 879 zero-crossings, a 440.05Hz frequency
-estimate -- matching the driven frequency almost exactly, with a real
+Verified after the fix, fully isolated from any live emulator (a synthetic
+producer thread emitting real ~880 transitions/sec with realistic
+scheduling jitter, feeding `Pb7Audio` exactly as the real reader thread
+would): captured the actual samples written to a real audio device over
+1 second and confirmed 879 zero-crossings, a 440.05Hz frequency estimate
+-- matching the driven frequency almost exactly, with a real
 `sd.OutputStream` and no artificial shortcuts.
 
+4. **Known, accepted residual limitation, confirmed and not further
+   fixable in this peripheral:** against the *real* emulator, the human
+   still heard a recognizable but somewhat rough/flat tone (measured:
+   ~431Hz instead of ~440Hz, with real half-period jitter). Traced to the
+   wall-clock arrival timing of the VIA's own broadcast messages, not to
+   anything downstream: a bare blocking `recv()` loop with nothing else
+   running already shows ~0.65ms stdev on PB7's ~1.14ms half-period,
+   essentially matching the full running app (~0.77ms) -- zero underruns
+   or resyncs either way, so it isn't `Pb7Audio`'s reader thread or the
+   render loop falling behind. `emma65` maintains cycle-accurate emulation
+   internally, but as an ordinary (non-realtime-scheduled) OS process its
+   wall-clock message timing still inherits whatever the OS scheduler does
+   to it -- exactly the design doc's own named risk ("jitter/coalescing
+   from socket delivery timing, GC pauses, OS scheduling, etc."). Its
+   proposed remedy is a dedicated transport carrying the emulator's
+   *cycle count* per edge instead of a wall-clock timestamp -- a
+   `emma65-rust` wire-protocol change, out of scope for this peripheral.
+   Accepted as Unit 9's scoped deliverable rather than chased further.
+
 What's left for human verification below is the part the agent genuinely
-cannot do itself: whether the reconstructed square wave, driven by the
-*actual ROM/emulator* rather than a synthetic stand-in, sounds like a
-clean ~440Hz tone, and that the visual widgets render/click correctly.
+cannot do itself: confirming the tone is now recognizable (not the
+unrecognizable noise from earlier iterations) and that the visual widgets
+render/click correctly. Don't expect audiophile-grade purity -- see (4).
 
 ## Build the 6502 test program
 
@@ -140,11 +159,16 @@ Launch the peripheral as shown above.
 
 ### Audio: tone on, tone off
 
-4. **You should hear a continuous, roughly-440Hz tone** as soon as the
-   peripheral connects (assuming your machine has a working audio output
-   device and `libportaudio2` installed -- on Linux, `sudo apt install
+4. **You should hear a continuous, recognizable square-wave-ish tone in
+   the neighborhood of 440Hz** as soon as the peripheral connects
+   (assuming your machine has a working audio output device and
+   `libportaudio2` installed -- on Linux, `sudo apt install
    libportaudio2` if the peripheral's own terminal prints a "PB7 audio
-   disabled" line).
+   disabled" line). It won't be a pure, perfectly steady tone -- some
+   roughness and mild pitch drift are expected and accepted; see the
+   "Known, accepted residual limitation" note above. What you're checking
+   here is that it's clearly a recognizable tone, not unintelligible
+   noise/static.
 5. **Click the speaker icon.** It should switch to its muted rendering (dim
    fill, single bright diagonal stroke through it, per checkpoint 2) and
    the tone should stop immediately. Click it again: the icon relights and

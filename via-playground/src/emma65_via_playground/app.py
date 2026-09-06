@@ -557,6 +557,25 @@ class Pb7Audio:
     hear"), so surfacing it is worth the noise. The reader thread is only
     started once a stream actually opens -- no point tracking a level
     nothing will ever play.
+
+    **Known, accepted residual limitation** (confirmed, not further fixable
+    here): the reconstructed tone still carries some roughness/pitch drift
+    beyond what (1)-(3) above account for. Measured directly: a bare
+    blocking `recv()` loop with nothing else running -- no `Pb7Audio`, no
+    render loop, no audio stream -- already shows ~0.65ms stdev on PB7's
+    ~1.14ms half-period, essentially matching what the full running app
+    shows (~0.77ms). So the jitter is present in the wall-clock arrival
+    timing of the VIA's own broadcast messages, upstream of everything in
+    this class. `emma65` maintains cycle-accurate emulation internally,
+    but as an ordinary (non-realtime-scheduled) OS process its wall-clock
+    message timing still inherits whatever the OS scheduler does to it --
+    exactly the design doc's own named risk ("jitter/coalescing from
+    socket delivery timing, GC pauses, OS scheduling, etc."). Its own
+    proposed remedy is a dedicated transport carrying the emulator's
+    *cycle count* per edge instead of a wall-clock arrival timestamp,
+    which would need a wire-protocol change in `emma65-rust` itself --
+    out of scope for this peripheral. Don't chase this further in Python;
+    there's nothing left to fix on this side of the socket.
     """
 
     def __init__(self, port_b: PortIO, socket_path: str):
@@ -573,6 +592,16 @@ class Pb7Audio:
         self._level = -PB7_AUDIO_AMPLITUDE  # idle level until the first edge arrives
         self._t0: float | None = None  # perf_counter() at the first edge; the sample-time origin
         self._jitter_samples = round(PB7_AUDIO_JITTER_MS / 1000 * PB7_AUDIO_SAMPLE_RATE)
+        # Diagnostic counters, not currently surfaced in the UI -- `resyncs`
+        # (the reader thread fell more than one jitter-buffer's worth behind
+        # or ahead of the callback) and `underruns` (a callback found less
+        # than `frames` worth of new ring content and repeated the last
+        # level to fill the gap) both indicate PB7_AUDIO_JITTER_MS is too
+        # small for how much real-world jitter this process's reader thread
+        # experiences -- worth checking if the reconstructed tone sounds
+        # rough despite the wire signal itself measuring clean.
+        self.resyncs = 0
+        self.underruns = 0
 
         if sd is None:
             print("PB7 audio disabled: sounddevice/PortAudio not available in this environment", file=sys.stderr)
@@ -683,6 +712,7 @@ class Pb7Audio:
             desired_read = self._write_pos - self._jitter_samples
             if abs(self._read_pos - desired_read) > self._jitter_samples:
                 self._read_pos = desired_read  # resync after drift/underrun
+                self.resyncs += 1
             cap = PB7_AUDIO_RING_CAPACITY
             n = min(frames, max(self._write_pos - self._read_pos, 0))
             if n:
@@ -696,6 +726,7 @@ class Pb7Audio:
                     outdata[k:n, 0] = self._ring[: end - cap]
             if n < frames:
                 outdata[n:, 0] = self._level
+                self.underruns += 1
             self._read_pos += n
         pb7 = self._port_b.pb7
         if pb7 is None or not pb7.speaker_on:
