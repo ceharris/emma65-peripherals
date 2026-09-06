@@ -15,10 +15,18 @@ single pin-list constructor behind both `build_port_a`/`build_port_b`, and
 `layout_ports` composes multiple `layout_row` calls (one per port,
 separated by `PORT_GAP`) so a combined multi-port canvas is measured and
 placed the same drift-proof way checkpoint 2 established for one row.
+
+`PB6Cell` (Unit 8) is a thin `DataCell` decorator for PB6's layered T2
+pulse-counting capability -- see its own docstring. `draw_declared_marker`
+is a shared visual convention (a dashed ring) for any widget showing a
+declared/fixed value rather than something derived live from the VIA,
+used by both `ControlCell`'s placeholder chevron and `PB6Cell`'s
+forced-pulled-up LED.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import pygame
@@ -150,6 +158,28 @@ def draw_chevron(surf, cx, y0, size, direction: Direction, filled: bool):
         pygame.draw.polygon(surf, color, points, width=2)
 
 
+def draw_declared_marker(surf, cx, cy, r):
+    """Dashed ring marking a widget whose reading is a declared/fixed value
+    rather than something derived live from the VIA.
+
+    Shared convention for two ambiguities checkpoint 2 flagged separately:
+    the control-cell chevron's always-outlined placeholder direction (PCR
+    is never reported over the wire) and PB6's forced-pulled-up LED when
+    declared for T2 pulse counting (ACR is never reported either) -- see
+    `PB6Cell`. One mechanism instead of two bespoke fixes.
+    """
+    ring_r = r + sc(4)
+    dashes = 8
+    for i in range(dashes):
+        if i % 2:
+            continue
+        a0 = 2 * math.pi * i / dashes
+        a1 = 2 * math.pi * (i + 0.6) / dashes
+        p0 = (cx + ring_r * math.cos(a0), cy + ring_r * math.sin(a0))
+        p1 = (cx + ring_r * math.cos(a1), cy + ring_r * math.sin(a1))
+        pygame.draw.line(surf, TEXT_DIM, p0, p1, 1)
+
+
 def draw_seg_display(surf, font, cx, cy, text, color=SEG_ON):
     # Auto-sized to the text plus a tight pad, rather than a fixed box.
     pad_x, pad_y = sc(3), sc(2)
@@ -234,12 +264,21 @@ class Cell:
     def _chevron_filled(self) -> bool:
         raise NotImplementedError
 
+    def _chevron_declared(self) -> bool:
+        """Whether the chevron shows a declared/fixed placeholder rather
+        than a direction/level actually derived from live VIA data -- see
+        `draw_declared_marker`. Most cells' chevrons are live; override
+        where that isn't true."""
+        return False
+
     def _draw_body(self, surf, fonts: Fonts) -> None:
         raise NotImplementedError
 
     def draw(self, surf, fonts: Fonts) -> None:
         draw_text(surf, fonts.label, self.name, TEXT, center=(self.rect.centerx, label_center_y))
         draw_chevron(surf, self.rect.centerx, chevron_y0, chevron_size, self.direction, self._chevron_filled())
+        if self._chevron_declared():
+            draw_declared_marker(surf, self.rect.centerx, chevron_y0 + chevron_size / 2, chevron_size / 2)
         pygame.draw.rect(surf, PANEL, self.rect, border_radius=10)
         pygame.draw.rect(surf, PANEL_EDGE, self.rect, width=1, border_radius=10)
         self._draw_body(surf, fonts)
@@ -312,14 +351,78 @@ class DataCell(Cell):
         draw_momentary(surf, *momentary_rect.center, momentary_rect.width // 2, pressed=self.momentary_pressed)
 
 
+class PB6Cell(DataCell):
+    """PB6: full standard data-cell anatomy plus a layered T2 pulse-counting capability.
+
+    Per the design doc, PB6 "behaves like any other data pin except when
+    T2's pulse-counting mode is active" -- a layered capability, not a
+    replacement. Whether that layered behavior applies to this panel is a
+    declared, CLI-level setting (`pulse_counting`), not something read
+    live: the VIA peer protocol never reports ACR (see
+    `emma65_via.protocol`'s module docstring), the same reasoning that
+    made pin direction a declared setting rather than a DDR readback
+    (Unit 4).
+
+    When `pulse_counting` is True:
+    - `local` is forced True (pulled up, required for pulse counting) at
+      construction and never flipped by a toggle click again.
+    - The ordinary local-pull toggle is repurposed into a pulse/level
+      mode-select (`mode`) for the momentary switch, reusing the same
+      toggle position and the segment-display real estate `ControlCell`
+      uses one gap below it.
+    - The LED still shows `driven` (local XOR momentary, same formula as
+      any `DataCell`), but carries the shared "declared, not toggle-set"
+      marker (`draw_declared_marker`) since `local` no longer reflects a
+      user's toggle position moment to moment -- the same ambiguity
+      checkpoint 2 flagged for the control-cell placeholder chevron,
+      resolved here with the same mechanism instead of a bespoke fix.
+
+    When `pulse_counting` is False, PB6 draws and behaves exactly like any
+    other `DataCell`.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        direction: Direction,
+        local: bool,
+        pin: bool,
+        pulse_counting: bool,
+        mode: Mode = "level",
+        momentary_pressed: bool = False,
+        bit: int | None = None,
+        port: str = "",
+    ):
+        super().__init__(name, direction, local, pin, momentary_pressed, bit, port)
+        self.pulse_counting = pulse_counting
+        self.mode = mode
+
+    def _draw_body(self, surf, fonts: Fonts) -> None:
+        if not self.pulse_counting:
+            super()._draw_body(surf, fonts)
+            return
+        led_cy = self.rect.top + LED_OFF_DATA
+        draw_led(surf, self.rect.centerx, led_cy, sc(13), on=self.driven)
+        draw_declared_marker(surf, self.rect.centerx, led_cy, sc(13))
+        toggle_rect = self.toggle_rect()
+        draw_toggle(surf, *toggle_rect.center, toggle_rect.width, toggle_rect.height, on=(self.mode == "pulse"))
+        seg_text = "PLS" if self.mode == "pulse" else "LVL"
+        draw_seg_display(surf, fonts.seg, self.rect.centerx, self.rect.top + SEG_OFF, seg_text)
+        momentary_rect = self.momentary_rect()
+        draw_momentary(surf, *momentary_rect.center, momentary_rect.width // 2, pressed=self.momentary_pressed)
+
+
 class ControlCell(Cell):
     """A control pin (CAx/CBx): mode toggle + PLS/LVL readout, polarity icon, momentary.
 
     The chevron is intentionally always outlined -- control-line direction
     is context-dependent on live PCR state, which isn't derived yet
-    (checkpoint 1's documented placeholder). The LED stays dark: per
-    checkpoint 2 it should show the pin's level only when this line is
-    currently serving as a VIA-driven output, which isn't wired up yet.
+    (checkpoint 1's documented placeholder), and carries the shared
+    "declared, not live-derived" marker (`draw_declared_marker`, Unit 8) so
+    it doesn't read as a genuine low-pin-state reading. The LED stays
+    dark: per checkpoint 2 it should show the pin's level only when this
+    line is currently serving as a VIA-driven output, which isn't wired up
+    yet.
     """
 
     kind = "ctrl"
@@ -346,6 +449,9 @@ class ControlCell(Cell):
 
     def _chevron_filled(self) -> bool:
         return False
+
+    def _chevron_declared(self) -> bool:
+        return True
 
     def mode_rect(self) -> pygame.Rect:
         """Clickable area for the pulse/level mode toggle, for hit-testing."""
@@ -459,15 +565,27 @@ def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
     return build_port("A", 8, direction_mask)
 
 
-def build_port_b(direction_mask: int = 0x38) -> list[Cell]:
-    """Port B row: PB5..PB0 (direction per `direction_mask`), CB1, CB2.
+def build_port_b(direction_mask: int = 0x38, pulse_counting: bool = True) -> list[Cell]:
+    """Port B row: PB6 (see `PB6Cell`), PB5..PB0 (direction per
+    `direction_mask`), CB1, CB2.
 
-    Only PB0-PB5 are in scope for Unit 7 -- PB6/PB7's special-case behavior
-    (pulse-counting mode, T1 free-run/audio) is Units 8-9, so this panel
-    doesn't yet own or render those two bits. See `build_port` for the
-    shared semantics of `direction_mask`.
+    PB7's special-case behavior (T1 free-run/audio) is Unit 9, so this
+    panel doesn't yet own or render that bit. PB0-PB5 and the control
+    cells come from the shared `build_port` constructor unchanged; PB6 is
+    layered on separately since its cell type (`PB6Cell`) and declared
+    `pulse_counting` setting are unique to this one bit. See `build_port`
+    for the shared semantics of `direction_mask` and `PB6Cell` for
+    `pulse_counting`.
     """
-    return build_port("B", 6, direction_mask)
+    port = build_port("B", 6, direction_mask & 0x3F)
+    data_cells, ctrl_cells = port[:-2], port[-2:]
+    pb6 = PB6Cell(
+        "PB6",
+        direction=("out" if (direction_mask >> 6) & 1 else "in"),
+        local=pulse_counting, pin=False, pulse_counting=pulse_counting,
+        bit=6, port="B",
+    )
+    return [pb6] + data_cells + ctrl_cells
 
 
 def draw_status_bar(surf, fonts, title: str, width: int) -> None:

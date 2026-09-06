@@ -2,16 +2,22 @@
 
 Connects to a `via/6522` device's `unix:` transport and speaks the VIA peer
 protocol's ASCII encoding via `emma65_via`. Port A's data pins (PA0-PA7) and
-Port B's (PB0-PB5; PB6/PB7 are Units 8-9) are fully interactive: clicking a
-toggle flips that pin's local-pull state and clicking-and-holding a
-momentary button asserts the opposite level for the duration of the press
-(see `PortIO`/`Peripheral`). The chevron's fill continues to track live
-pin-level events from the VIA; direction stays a declared, panel-side
-setting (`--pa-direction`/`--pb-direction`) since the protocol never conveys
-DDR. CA1/CA2/CB1/CB2 are momentary-only control lines: level mode drives the
+Port B's (PB0-PB6; PB7 is Unit 9) are fully interactive: clicking a toggle
+flips that pin's local-pull state and clicking-and-holding a momentary
+button asserts the opposite level for the duration of the press (see
+`PortIO`/`Peripheral`). The chevron's fill continues to track live pin-level
+events from the VIA; direction stays a declared, panel-side setting
+(`--pa-direction`/`--pb-direction`) since the protocol never conveys DDR.
+CA1/CA2/CB1/CB2 are momentary-only control lines: level mode drives the
 active edge for as long as the button is held, pulse mode fires one
 fixed-duration transition per press regardless of hold time, and polarity
 picks which edge (rising/falling) counts as "active" (see `ControlPinState`).
+
+PB6 layers T2 pulse-counting behavior on top of an ordinary data pin when
+`--pb6-pulse-counting` is declared (default on): it's forced pulled up, and
+its toggle is repurposed into the same pulse/level mode-select CA1/CA2 use
+for their momentary, since the wire protocol never reports ACR either (see
+`PB6State`).
 """
 
 from __future__ import annotations
@@ -63,10 +69,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--pb-direction", type=_hex_byte, default=DEFAULT_PB_DIRECTION, metavar="HEX",
-        help="Declared DDRB value for Port B data pins PB0-PB5, as a hex byte -- bit n set "
+        help="Declared DDRB value for Port B data pins PB0-PB6, as a hex byte -- bit n set "
         f"means PBn is an output (default: {DEFAULT_PB_DIRECTION:02X}, i.e. PB5-PB3 out, "
-        "PB2-PB0 in). Bits 6-7 are ignored (PB6/PB7 aren't in scope yet). Same DDR caveat "
-        "as --pa-direction applies.",
+        "PB2-PB0 in, PB6 in). Bit 7 is ignored (PB7 isn't in scope yet). Same DDR caveat "
+        "as --pa-direction applies; for PB6 this is independent of --pb6-pulse-counting, "
+        "which governs local pull, not direction.",
+    )
+    parser.add_argument(
+        "--pb6-pulse-counting", action=argparse.BooleanOptionalAction, default=True,
+        help="Declare whether PB6 is wired to Timer 2's external pulse-counting input for "
+        "this panel (default: enabled). The VIA peer protocol never reports ACR, so this "
+        "can't be read live from the VIA -- same reasoning as --pa-direction/--pb-direction. "
+        "When enabled, PB6 is forced pulled up and its toggle is repurposed into a "
+        "pulse/level mode-select for the momentary switch; when disabled (--no-pb6-pulse-"
+        "counting), PB6 behaves exactly like any other Port B data pin.",
     )
     return parser.parse_args(argv)
 
@@ -99,22 +115,44 @@ class ControlPinState:
 
 
 @dataclass
+class PB6State:
+    """PB6's declared T2 pulse-counting configuration and momentary mode.
+
+    `pulse_counting` is a declared, CLI-level fact (`--pb6-pulse-counting`)
+    -- the VIA peer protocol never reports ACR (same reasoning as the DDR
+    finding behind `--pa-direction`/`--pb-direction`), so whether PB6 is
+    actually wired to T2's external pulse-counting input can't be read
+    live. `mode`/`pulse_release_at` mirror `ControlPinState`'s pulse-vs-
+    level timing, applied to PB6's momentary button (`press_pb6`/
+    `release_pb6`) instead of a control pin.
+    """
+
+    pulse_counting: bool
+    mode: cells.Mode = "level"
+    pulse_release_at: int | None = None
+
+
+@dataclass
 class PortIO:
     """Local write-state for one port's data bits and two control pins.
 
     `num_bits` is how many data lines this panel owns on this port (8 for
-    Port A, 6 for Port B since PB6/PB7 aren't in scope until Units 8-9) --
-    it bounds reconnect re-assertion so the panel never sends a bit it
-    doesn't own.
+    Port A, 7 for Port B now that PB6 is in scope -- PB7 isn't until Unit
+    9) -- it bounds reconnect re-assertion so the panel never sends a bit
+    it doesn't own.
 
     `local` is the toggle position bitmask (bit set = pulling high) -- the
-    LED and toggle widgets reflect this directly. `momentary` is which bits
-    currently have their momentary button held, which asserts the
-    *opposite* of the toggle's level for the duration of the press
-    (mirroring `emma65_buttons.ButtonPeripheral.toggle`/`_send_bit`,
-    generalized from one hardcoded bit to 8 independent ones, and now to
-    more than one port). `level` is the live pin level read back from the
-    VIA. `ctrl` maps control-pin number (1 or 2) to its `ControlPinState`.
+    LED and toggle widgets reflect this directly, except for Port B's bit
+    6 when `pb6.pulse_counting` is declared, where it's a fixed fact set
+    once at construction rather than something a toggle click flips (see
+    `PB6State`). `momentary` is which bits currently have their momentary
+    button held, which asserts the *opposite* of the toggle's level for
+    the duration of the press (mirroring
+    `emma65_buttons.ButtonPeripheral.toggle`/`_send_bit`, generalized from
+    one hardcoded bit to 8 independent ones, and now to more than one
+    port). `level` is the live pin level read back from the VIA. `ctrl`
+    maps control-pin number (1 or 2) to its `ControlPinState`. `pb6` is
+    only set on Port B.
     """
 
     num_bits: int = 8
@@ -122,6 +160,7 @@ class PortIO:
     local: int = 0
     momentary: int = 0
     ctrl: dict[int, ControlPinState] = field(default_factory=lambda: {1: ControlPinState(), 2: ControlPinState()})
+    pb6: PB6State | None = None
 
     def driven_level(self, bit: int) -> bool:
         mask = 1 << bit
@@ -141,7 +180,10 @@ class Peripheral:
     def __init__(self, args: argparse.Namespace):
         self._client = ViaAsciiClient(args.socket)
         self._next_connect_attempt = 0
-        self.ports: dict[str, PortIO] = {"A": PortIO(num_bits=8), "B": PortIO(num_bits=6)}
+        port_b = PortIO(num_bits=7, pb6=PB6State(pulse_counting=args.pb6_pulse_counting))
+        if port_b.pb6.pulse_counting:
+            port_b.local |= 1 << 6  # forced pulled up, per PB6State
+        self.ports: dict[str, PortIO] = {"A": PortIO(num_bits=8), "B": port_b}
 
     @property
     def connected(self) -> bool:
@@ -245,12 +287,18 @@ class Peripheral:
             self._send_ctrl(port, pin, state.idle_level())
 
     def update_ctrl_pulses(self, now_ms: int) -> None:
-        """Reverts any control pin (on any port) whose fixed-duration pulse has elapsed back to idle."""
+        """Reverts any control pin, or PB6's declared pulse-counting momentary
+        (see `press_pb6`), whose fixed-duration pulse has elapsed back to idle."""
         for port, io in self.ports.items():
             for pin, state in io.ctrl.items():
                 if state.pulse_release_at is not None and now_ms >= state.pulse_release_at:
                     state.pulse_release_at = None
                     self._send_ctrl(port, pin, state.idle_level())
+            pb6 = io.pb6
+            if pb6 is not None and pb6.pulse_release_at is not None and now_ms >= pb6.pulse_release_at:
+                pb6.pulse_release_at = None
+                io.momentary &= ~(1 << 6)
+                self._send_bit(port, 6, io.driven_level(6))
 
     def toggle_ctrl_mode(self, port: str, pin: int) -> None:
         """Flips `pin` on `port` between pulse and level mode.
@@ -273,6 +321,50 @@ class Peripheral:
         if not state.held and state.pulse_release_at is None:
             self._send_ctrl(port, pin, state.idle_level())
 
+    def toggle_pb6_mode(self, port: str) -> None:
+        """Flips PB6's repurposed toggle between pulse and level mode (declared pulse-counting only).
+
+        Mirrors `toggle_ctrl_mode`: cancels any in-flight pulse and
+        reasserts the idle (pulled-up) level.
+        """
+        io = self.ports[port]
+        pb6 = io.pb6
+        pb6.mode = "level" if pb6.mode == "pulse" else "pulse"
+        if pb6.pulse_release_at is not None:
+            pb6.pulse_release_at = None
+            io.momentary &= ~(1 << 6)
+            self._send_bit(port, 6, io.driven_level(6))
+
+    def press_pb6(self, port: str, now_ms: int) -> None:
+        """Presses PB6's momentary button (declared pulse-counting only).
+
+        Level mode drives the pulled-low level for as long as the button
+        stays held, mirroring an ordinary data-bit momentary. Pulse mode
+        fires one fixed-duration low pulse regardless of hold time,
+        mirroring `press_ctrl` -- suited to driving T2's negative-edge
+        pulse-counting input without depending on human timing.
+        """
+        io = self.ports[port]
+        pb6 = io.pb6
+        mask = 1 << 6
+        io.momentary |= mask
+        if pb6.mode == "pulse":
+            pb6.pulse_release_at = now_ms + CTRL_PULSE_DURATION_MS
+        self._send_bit(port, 6, io.driven_level(6))
+
+    def release_pb6(self, port: str) -> None:
+        """Releases PB6's momentary button (declared pulse-counting only).
+
+        Level mode returns to idle (pulled-up) immediately. In pulse mode
+        the revert is already scheduled via `update_ctrl_pulses`, so an
+        early release doesn't change the wire -- mirrors `release_ctrl`.
+        """
+        io = self.ports[port]
+        pb6 = io.pb6
+        if pb6.mode == "level":
+            io.momentary &= ~(1 << 6)
+            self._send_bit(port, 6, io.driven_level(6))
+
     def _send_ctrl(self, port: str, pin: int, level: bool) -> None:
         if not self._client.connected:
             return
@@ -292,7 +384,10 @@ def run(args: argparse.Namespace) -> None:
     pygame.init()
     pygame.display.set_caption("emma65 VIA GPIO playground")
 
-    ports = [cells.build_port_a(args.pa_direction), cells.build_port_b(args.pb_direction)]
+    ports = [
+        cells.build_port_a(args.pa_direction),
+        cells.build_port_b(args.pb_direction, args.pb6_pulse_counting),
+    ]
     content_right = cells.layout_ports(ports, 0)
     window_size = (
         cells.LEFT_MARGIN + content_right + cells.LEFT_MARGIN,
@@ -308,8 +403,11 @@ def run(args: argparse.Namespace) -> None:
     all_cells = [cell for port in ports for cell in port]
     data_cells = [cell for cell in all_cells if isinstance(cell, cells.DataCell) and cell.bit is not None]
     ctrl_cells = [cell for cell in all_cells if isinstance(cell, cells.ControlCell) and cell.ctrl_pin is not None]
-    pressed_momentary: tuple[str, int] | None = None
+    pressed_momentary: cells.DataCell | None = None
     pressed_ctrl: tuple[str, int] | None = None
+
+    def is_pb6_pulse_counting(cell: cells.DataCell) -> bool:
+        return isinstance(cell, cells.PB6Cell) and cell.pulse_counting
 
     running = True
     while running:
@@ -322,11 +420,17 @@ def run(args: argparse.Namespace) -> None:
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 for cell in data_cells:
                     if cell.toggle_rect().collidepoint(event.pos):
-                        peripheral.toggle_data(cell.port, cell.bit)
+                        if is_pb6_pulse_counting(cell):
+                            peripheral.toggle_pb6_mode(cell.port)
+                        else:
+                            peripheral.toggle_data(cell.port, cell.bit)
                         break
                     if cell.momentary_rect().collidepoint(event.pos):
-                        peripheral.set_momentary(cell.port, cell.bit, True)
-                        pressed_momentary = (cell.port, cell.bit)
+                        if is_pb6_pulse_counting(cell):
+                            peripheral.press_pb6(cell.port, now_ms)
+                        else:
+                            peripheral.set_momentary(cell.port, cell.bit, True)
+                        pressed_momentary = cell
                         break
                 else:
                     for cell in ctrl_cells:
@@ -342,7 +446,10 @@ def run(args: argparse.Namespace) -> None:
                             break
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 if pressed_momentary is not None:
-                    peripheral.set_momentary(*pressed_momentary, False)
+                    if is_pb6_pulse_counting(pressed_momentary):
+                        peripheral.release_pb6(pressed_momentary.port)
+                    else:
+                        peripheral.set_momentary(pressed_momentary.port, pressed_momentary.bit, False)
                     pressed_momentary = None
                 if pressed_ctrl is not None:
                     peripheral.release_ctrl(*pressed_ctrl)
@@ -355,6 +462,8 @@ def run(args: argparse.Namespace) -> None:
             cell.pin = bool((io.level >> cell.bit) & 1)
             cell.local = bool((io.local >> cell.bit) & 1)
             cell.momentary_pressed = bool((io.momentary >> cell.bit) & 1)
+            if is_pb6_pulse_counting(cell):
+                cell.mode = io.pb6.mode
         for cell in ctrl_cells:
             state = peripheral.ports[cell.port].ctrl[cell.ctrl_pin]
             cell.mode = state.mode
