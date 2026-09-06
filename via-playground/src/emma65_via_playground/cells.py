@@ -3,8 +3,9 @@
 Translates the settled visual language from the GPIO playground design
 checkpoints (`gpio-playground/plan/via_gpio_playground_ui_checkpoint.md`,
 `..._checkpoint_2.md`, reference mockup `row_mockup.py`) into structured,
-reusable widget classes, all state carried statically for now -- live VIA
-data and interactivity land in later units.
+reusable widget classes. Cells only carry rendering state and hit-test
+geometry; live VIA data and interactivity are owned by `Peripheral` in
+`app.py` and pushed into cells each frame.
 
 Row layout (`layout_row`) is a function of a list of `Cell`s and a starting
 x-position, not hardcoded to one port, so Port B (Unit 7) becomes a second
@@ -292,7 +293,7 @@ class DataCell(Cell):
 
 
 class ControlCell(Cell):
-    """A control pin (CAx/CBx): mode toggle + PUL/LVL readout, polarity icon, momentary.
+    """A control pin (CAx/CBx): mode toggle + PLS/LVL readout, polarity icon, momentary.
 
     The chevron is intentionally always outlined -- control-line direction
     is context-dependent on live PCR state, which isn't derived yet
@@ -303,10 +304,20 @@ class ControlCell(Cell):
 
     kind = "ctrl"
 
-    def __init__(self, name: str, direction: Direction, mode: Mode, polarity: Polarity):
+    def __init__(
+        self,
+        name: str,
+        direction: Direction,
+        mode: Mode,
+        polarity: Polarity,
+        momentary_pressed: bool = False,
+        ctrl_pin: int | None = None,
+    ):
         super().__init__(name, direction)
         self.mode = mode
         self.polarity = polarity
+        self.momentary_pressed = momentary_pressed
+        self.ctrl_pin = ctrl_pin
 
     @property
     def width(self) -> int:
@@ -315,13 +326,35 @@ class ControlCell(Cell):
     def _chevron_filled(self) -> bool:
         return False
 
+    def mode_rect(self) -> pygame.Rect:
+        """Clickable area for the pulse/level mode toggle, for hit-testing."""
+        rect = pygame.Rect(0, 0, sc(28), sc(15))
+        rect.center = (self.rect.centerx, self.rect.top + TOGGLE_OFF)
+        return rect
+
+    def polarity_rect(self) -> pygame.Rect:
+        """Clickable area for the polarity pulse-graph icon, for hit-testing."""
+        rect = pygame.Rect(0, 0, sc(30), sc(16))
+        rect.center = (self.rect.centerx, self.rect.top + POLARITY_OFF)
+        return rect
+
+    def momentary_rect(self) -> pygame.Rect:
+        """Clickable area for this cell's momentary button, for hit-testing."""
+        r = sc(13)
+        rect = pygame.Rect(0, 0, r * 2, r * 2)
+        rect.center = (self.rect.centerx, self.rect.top + MOMENTARY_OFF)
+        return rect
+
     def _draw_body(self, surf, fonts: Fonts) -> None:
         draw_led(surf, self.rect.centerx, self.rect.top + LED_OFF_CTRL, sc(12), on=False)
-        draw_toggle(surf, self.rect.centerx, self.rect.top + TOGGLE_OFF, sc(28), sc(15), on=(self.mode == "pulse"))
-        seg_text = "PUL" if self.mode == "pulse" else "LVL"
+        toggle_rect = self.mode_rect()
+        draw_toggle(surf, *toggle_rect.center, toggle_rect.width, toggle_rect.height, on=(self.mode == "pulse"))
+        seg_text = "PLS" if self.mode == "pulse" else "LVL"
         draw_seg_display(surf, fonts.seg, self.rect.centerx, self.rect.top + SEG_OFF, seg_text)
-        draw_pulse_icon(surf, self.rect.centerx, self.rect.top + POLARITY_OFF, sc(30), sc(16), self.polarity)
-        draw_momentary(surf, self.rect.centerx, self.rect.top + MOMENTARY_OFF, sc(13), pressed=False)
+        polarity_rect = self.polarity_rect()
+        draw_pulse_icon(surf, *polarity_rect.center, polarity_rect.width, polarity_rect.height, self.polarity)
+        momentary_rect = self.momentary_rect()
+        draw_momentary(surf, *momentary_rect.center, momentary_rect.width // 2, pressed=self.momentary_pressed)
 
 
 def layout_row(cells: list[Cell], start_x: int) -> int:
@@ -364,8 +397,8 @@ def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
         for n in range(7, -1, -1)
     ]
     return data_cells + [
-        ControlCell("CA1", direction="in", mode="pulse", polarity="rising"),
-        ControlCell("CA2", direction="out", mode="level", polarity="falling"),
+        ControlCell("CA1", direction="in", mode="level", polarity="rising", ctrl_pin=1),
+        ControlCell("CA2", direction="out", mode="level", polarity="rising", ctrl_pin=2),
     ]
 
 

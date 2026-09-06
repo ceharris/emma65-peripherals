@@ -6,7 +6,7 @@ import socket
 
 import pytest
 
-from emma65_via_playground.app import Peripheral, parse_args
+from emma65_via_playground.app import CTRL_PULSE_DURATION_MS, ControlPinState, Peripheral, parse_args
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def connected_peripheral(via_server):
     peripheral = Peripheral(parse_args(["--socket", sock_path]))
     peripheral.connect_if_needed(0)
     conn, _ = server.accept()
-    conn.recv(1024)  # discard the initial connect-time reassertion of default (all-low) state
+    conn.recv(1024)  # discard the initial connect-time reassertion of default data/control state
     yield peripheral, conn
     peripheral.close()
     conn.close()
@@ -236,10 +236,163 @@ def test_reconnect_reasserts_local_and_momentary_state_for_all_bits(via_server):
 
     # Bit 1's toggle is on (driven high); bit 6's toggle is also on, but its
     # momentary press overrides it back to driven-low; every other bit is
-    # driven low by its (untouched) toggle position.
+    # driven low by its (untouched) toggle position. CA1/CA2 are untouched,
+    # so they reassert to their default (rising) polarity's idle-low level.
     expected = b"".join(
         b"SA02" if bit == 1 else b"RA%02X" % (1 << bit) for bit in range(8)
-    )
+    ) + b"RCA1RCA2"
+    data = b""
+    while len(data) < len(expected):
+        data += conn2.recv(1024)
+    assert data == expected
+
+    peripheral.close()
+    conn2.close()
+
+
+def test_control_pin_state_idle_level_follows_polarity():
+    assert ControlPinState(polarity="rising").idle_level() is False
+    assert ControlPinState(polarity="falling").idle_level() is True
+
+
+def test_control_pin_state_driven_level_is_idle_when_untouched():
+    state = ControlPinState(polarity="rising")
+    assert state.driven_level() is False
+
+
+def test_control_pin_state_driven_level_in_level_mode_while_held():
+    state = ControlPinState(mode="level", polarity="rising", held=True)
+    assert state.driven_level() is True  # active = opposite of idle
+
+
+def test_control_pin_state_driven_level_while_pulsing_regardless_of_held():
+    state = ControlPinState(mode="pulse", polarity="falling", held=False, pulse_release_at=500)
+    assert state.driven_level() is False  # active = opposite of falling's idle-high
+
+
+def test_press_ctrl_in_level_mode_drives_active_level_while_held(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.press_ctrl(1, 0)  # CA1 default: level mode, rising polarity (idle low)
+    assert conn.recv(1024) == b"SCA1"
+
+    peripheral.release_ctrl(1)
+    assert conn.recv(1024) == b"RCA1"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_press_ctrl_in_level_mode_respects_falling_polarity(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_ctrl_polarity(2)  # CA2 default is rising (idle low); flip to falling
+    assert conn.recv(1024) == b"SCA2"  # idle level flips high, so it re-asserts immediately
+
+    peripheral.press_ctrl(2, 0)
+    assert conn.recv(1024) == b"RCA2"  # falling polarity's active level is low
+
+    peripheral.close()
+    conn.close()
+
+
+def test_press_ctrl_in_pulse_mode_fires_one_transition_ignoring_hold_time(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_ctrl_mode(1)  # CA1 -> pulse mode
+    peripheral.press_ctrl(1, 1000)
+    assert conn.recv(1024) == b"SCA1"
+
+    # Releasing before the pulse duration elapses must not change the wire.
+    peripheral.release_ctrl(1)
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    # Only update_ctrl_pulses, once the duration has elapsed, reverts to idle.
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS - 1)
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS)
+    assert conn.recv(1024) == b"RCA1"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_pressing_again_mid_pulse_restarts_the_timer(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_ctrl_mode(1)
+    peripheral.press_ctrl(1, 1000)
+    conn.recv(1024)
+
+    peripheral.press_ctrl(1, 1050)  # re-press before the first pulse would have ended
+    conn.recv(1024)  # re-asserts the active level again
+
+    # The original deadline (1000 + duration) has passed, but the restarted
+    # one (1050 + duration) has not -- must not have reverted yet.
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS)
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    peripheral.update_ctrl_pulses(1050 + CTRL_PULSE_DURATION_MS)
+    assert conn.recv(1024) == b"RCA1"
+
+    peripheral.close()
+    conn.close()
+
+
+def test_toggle_ctrl_mode_cancels_an_in_flight_pulse(connected_peripheral):
+    peripheral, conn = connected_peripheral
+
+    peripheral.toggle_ctrl_mode(1)  # -> pulse
+    peripheral.press_ctrl(1, 1000)
+    conn.recv(1024)
+
+    peripheral.toggle_ctrl_mode(1)  # -> level, mid-pulse
+    assert conn.recv(1024) == b"RCA1"  # reverted to idle immediately
+
+    # The cancelled pulse's deadline must no longer fire a spurious revert.
+    peripheral.update_ctrl_pulses(1000 + CTRL_PULSE_DURATION_MS)
+    conn.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        conn.recv(1024)
+    conn.setblocking(True)
+
+    peripheral.close()
+    conn.close()
+
+
+def test_reconnect_reasserts_control_pin_state(via_server):
+    sock_path, server = via_server
+    peripheral = Peripheral(parse_args(["--socket", sock_path]))
+
+    peripheral.connect_if_needed(0)
+    conn, _ = server.accept()
+    conn.recv(1024)  # discard the initial connect-time reassertion
+
+    peripheral.toggle_ctrl_mode(1)  # CA1 -> pulse
+    peripheral.press_ctrl(1, 0)  # begin a pulse, currently driving active-high
+    conn.recv(1024)
+
+    conn.close()
+    peripheral.poll()
+    assert not peripheral.connected
+
+    peripheral.connect_if_needed(0)
+    conn2, _ = server.accept()
+
+    # CA1's pulse is still "in flight" per its own state (reconnecting
+    # doesn't cancel it) so it reasserts the active level; CA2 is untouched
+    # and reasserts its idle (rising-polarity, idle-low) level.
+    expected = b"".join(b"RA%02X" % (1 << bit) for bit in range(8)) + b"SCA1RCA2"
     data = b""
     while len(data) < len(expected):
         data += conn2.recv(1024)

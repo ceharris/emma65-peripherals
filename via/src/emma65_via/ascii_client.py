@@ -49,6 +49,12 @@ class ViaAsciiClient:
     def reset_bits(self, port: str, mask: int) -> None:
         self._send(f"R{port}{mask:02X}")
 
+    def set_ctrl_pin(self, port: str, pin: int) -> None:
+        self._send(f"SC{port}{pin}")
+
+    def reset_ctrl_pin(self, port: str, pin: int) -> None:
+        self._send(f"RC{port}{pin}")
+
     def poll(self) -> list[ViaEvent]:
         """Reads inbound bytes and decodes them into events.
 

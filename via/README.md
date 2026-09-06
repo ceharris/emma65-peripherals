@@ -15,9 +15,11 @@ client.connect()  # non-blocking; returns False if the socket isn't up yet
 ## Write side
 
 `set_bits(port, mask)` / `reset_bits(port, mask)` send `S`/`R` messages for
-the given port (`"A"` or `"B"`) and bit mask. A peripheral should only ever
-set/reset the bits it's configured to drive — a port can be shared with other
-peripherals driving other bits.
+the given port (`"A"` or `"B"`) and bit mask. `set_ctrl_pin(port, pin)` /
+`reset_ctrl_pin(port, pin)` send the equivalent `SC`/`RC` messages for a
+single control pin (`1` or `2`) instead of a data-bit mask. A peripheral
+should only ever set/reset the bits or control pins it's configured to
+drive — a port can be shared with other peripherals driving other bits.
 
 ## Read side
 

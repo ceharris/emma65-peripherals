@@ -51,6 +51,18 @@ def test_reset_bits_sends_R_message(connected_pair):
     assert conn.recv(1024) == b"RB80"
 
 
+def test_set_ctrl_pin_sends_SC_message(connected_pair):
+    client, conn = connected_pair
+    client.set_ctrl_pin("A", 2)
+    assert conn.recv(1024) == b"SCA2"
+
+
+def test_reset_ctrl_pin_sends_RC_message(connected_pair):
+    client, conn = connected_pair
+    client.reset_ctrl_pin("B", 1)
+    assert conn.recv(1024) == b"RCB1"
+
+
 def test_drain_raises_connection_error_when_peer_closes(connected_pair):
     client, conn = connected_pair
     conn.close()
