@@ -2,13 +2,15 @@
 
 See the emma65 project's VIA Peer Protocol appendix for the full wire format.
 This client only ever sends Set Port / Reset Port messages for the bits it
-owns, and otherwise discards everything it reads.
+owns; `poll()` decodes everything the VIA sends back into `ViaEvent`s.
 """
 
 from __future__ import annotations
 
 import os
 import socket
+
+from .protocol import AsciiEventDecoder, ViaEvent
 
 
 class ViaAsciiClient:
@@ -17,6 +19,7 @@ class ViaAsciiClient:
     def __init__(self, path: str):
         self._path = os.path.expanduser(path)
         self._sock: socket.socket | None = None
+        self._decoder = AsciiEventDecoder()
 
     @property
     def connected(self) -> bool:
@@ -32,6 +35,7 @@ class ViaAsciiClient:
             return False
         sock.setblocking(False)
         self._sock = sock
+        self._decoder = AsciiEventDecoder()
         return True
 
     def close(self) -> None:
@@ -45,17 +49,30 @@ class ViaAsciiClient:
     def reset_bits(self, port: str, mask: int) -> None:
         self._send(f"R{port}{mask:02X}")
 
-    def drain(self) -> None:
-        """Discards inbound bytes. Raises ConnectionError if the peer closed the connection."""
+    def poll(self) -> list[ViaEvent]:
+        """Reads inbound bytes and decodes them into events.
+
+        Raises ConnectionError if the peer closed the connection.
+        """
         assert self._sock is not None
+        events: list[ViaEvent] = []
         try:
             while True:
                 data = self._sock.recv(4096)
                 if not data:
                     self.close()
                     raise ConnectionError("VIA connection closed")
+                for byte in data:
+                    event = self._decoder.feed(byte)
+                    if event is not None:
+                        events.append(event)
         except BlockingIOError:
             pass
+        return events
+
+    def drain(self) -> None:
+        """Discards inbound bytes (decoding and dropping any events). Raises ConnectionError if the peer closed."""
+        self.poll()
 
     def _send(self, message: str) -> None:
         assert self._sock is not None
