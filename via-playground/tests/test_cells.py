@@ -127,3 +127,34 @@ def test_toggle_and_momentary_rects_track_cell_placement():
     cell.place(40)
     assert cell.toggle_rect().centerx == cell.rect.centerx
     assert cell.momentary_rect().centerx == cell.rect.centerx
+
+
+def test_control_cell_mode_polarity_momentary_rects_are_distinct_and_within_cell():
+    cell = make_ctrl_cell()
+    cell.place(0)
+    mode_rect = cell.mode_rect()
+    polarity_rect = cell.polarity_rect()
+    momentary_rect = cell.momentary_rect()
+
+    assert not mode_rect.colliderect(polarity_rect)
+    assert not polarity_rect.colliderect(momentary_rect)
+    assert cell.rect.contains(mode_rect)
+    assert cell.rect.contains(polarity_rect)
+    assert cell.rect.contains(momentary_rect)
+    # mode -> polarity -> momentary, top to bottom, per the settled stacking order.
+    assert mode_rect.centery < polarity_rect.centery < momentary_rect.centery
+
+
+def test_control_cell_rects_track_cell_placement():
+    cell = make_ctrl_cell()
+    cell.place(40)
+    assert cell.mode_rect().centerx == cell.rect.centerx
+    assert cell.polarity_rect().centerx == cell.rect.centerx
+    assert cell.momentary_rect().centerx == cell.rect.centerx
+
+
+def test_build_port_a_control_cells_carry_their_ctrl_pin_number():
+    row = cells.build_port_a()
+    ctrl_cells = {cell.name: cell for cell in row if cell.kind == "ctrl"}
+    assert ctrl_cells["CA1"].ctrl_pin == 1
+    assert ctrl_cells["CA2"].ctrl_pin == 2
