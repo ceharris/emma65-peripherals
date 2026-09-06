@@ -243,11 +243,20 @@ class DataCell(Cell):
 
     kind = "data"
 
-    def __init__(self, name: str, direction: Direction, local: bool, pin: bool, momentary_pressed: bool = False):
+    def __init__(
+        self,
+        name: str,
+        direction: Direction,
+        local: bool,
+        pin: bool,
+        momentary_pressed: bool = False,
+        bit: int | None = None,
+    ):
         super().__init__(name, direction)
         self.local = local
         self.pin = pin
         self.momentary_pressed = momentary_pressed
+        self.bit = bit
 
     @property
     def width(self) -> int:
@@ -313,22 +322,28 @@ def layout_row(cells: list[Cell], start_x: int) -> int:
     return x - gap
 
 
-def build_port_a() -> list[Cell]:
-    """Port A row with static placeholder state (PA7..PA0, CA1, CA2).
+def build_port_a(direction_mask: int = 0xF0) -> list[Cell]:
+    """Port A row: PA7..PA0 (direction per `direction_mask`), CA1, CA2.
 
-    Values are chosen to exercise the distinct visual cases from the
-    design checkpoints -- agreement, pull-up losing to an output, genuine
-    contention, and momentary override -- not to reflect anything live.
+    `direction_mask` bit *n* set means PA*n* is declared an output. This is
+    a declared property of how the panel is wired for a given ROM/firmware,
+    not something read from the VIA -- the peer protocol never conveys DDR
+    (see `emma65_via.protocol`'s module docstring), and on real hardware an
+    external peripheral has no way to query it either. A mismatch between
+    this declaration and the firmware's actual DDRA shows up as chevron/LED
+    divergence (and, from Unit 10, the Overload indicator) rather than an
+    error -- the panel doesn't enforce correct configuration, mirroring real
+    hardware.
+
+    `local` and `pin` both start low; `pin` is kept live by the caller from
+    VIA port-state events, while `local` stays this fixed default until
+    Unit 5 wires up toggle/momentary interactivity.
     """
-    return [
-        DataCell("PA7", direction="out", local=True, pin=True),
-        DataCell("PA6", direction="out", local=True, pin=False),
-        DataCell("PA5", direction="out", local=False, pin=True),
-        DataCell("PA4", direction="out", local=True, pin=True),
-        DataCell("PA3", direction="out", local=False, pin=False),
-        DataCell("PA2", direction="in", local=True, pin=True),
-        DataCell("PA1", direction="in", local=False, pin=True, momentary_pressed=True),
-        DataCell("PA0", direction="in", local=False, pin=False),
+    data_cells = [
+        DataCell(f"PA{n}", direction=("out" if (direction_mask >> n) & 1 else "in"), local=False, pin=False, bit=n)
+        for n in range(7, -1, -1)
+    ]
+    return data_cells + [
         ControlCell("CA1", direction="in", mode="pulse", polarity="rising"),
         ControlCell("CA2", direction="out", mode="level", polarity="falling"),
     ]

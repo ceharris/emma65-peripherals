@@ -88,3 +88,22 @@ def test_control_cell_chevron_is_always_placeholder_outline():
     for mode in ("pulse", "level"):
         cell = cells.ControlCell("CA2", direction="out", mode=mode, polarity="falling")
         assert cell._chevron_filled() is False
+
+
+def test_build_port_a_direction_follows_declared_mask():
+    # Direction can't be read from the VIA (the peer protocol never conveys
+    # DDR) -- it's a declared property of how the panel is wired, passed in
+    # as a mask rather than derived from anything live.
+    row = cells.build_port_a(direction_mask=0b00000101)  # PA0, PA2 out; rest in
+    data_cells = {cell.name: cell for cell in row if cell.kind == "data"}
+    assert data_cells["PA0"].direction == "out"
+    assert data_cells["PA2"].direction == "out"
+    assert data_cells["PA1"].direction == "in"
+    assert data_cells["PA7"].direction == "in"
+
+
+def test_build_port_a_data_cells_carry_their_bit_index():
+    row = cells.build_port_a()
+    for cell in row:
+        if cell.kind == "data":
+            assert cell.bit == int(cell.name.removeprefix("PA"))
